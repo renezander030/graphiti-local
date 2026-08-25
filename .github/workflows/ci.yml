@@ -18,4 +18,4 @@ jobs:
       - run: uv sync --extra dev
       - run: uv run ruff check .
       - run: uv run pytest
-      - run: uv run python scripts/release_audit.py .
+      - run: uv run python scripts/release_audit.py . --allow-remote

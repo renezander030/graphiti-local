@@ -30,7 +30,7 @@ PATTERNS = {
 }
 
 
-def audit(root: Path) -> list[str]:
+def audit(root: Path, *, allow_remote: bool = False) -> list[str]:
     findings = []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
@@ -52,7 +52,7 @@ def audit(root: Path) -> list[str]:
             capture_output=True,
             text=True,
         ).stdout.strip()
-        if remote:
+        if remote and not allow_remote:
             findings.append("git metadata: remote configured")
         identities = subprocess.run(
             ["git", "log", "--format=%an <%ae>"],
@@ -69,16 +69,23 @@ def audit(root: Path) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, nargs="?", default=Path.cwd())
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="allow the expected Git remote in CI or an already-published checkout",
+    )
     args = parser.parse_args()
-    findings = audit(args.root.resolve())
+    findings = audit(args.root.resolve(), allow_remote=args.allow_remote)
     if findings:
         print("release audit failed:")
         for finding in findings:
             print(f" - {finding}")
         raise SystemExit(1)
-    print("release audit passed: no likely secrets, PII, local paths, or remotes")
+    if args.allow_remote:
+        print("release audit passed: no likely secrets, PII, or local paths; remote allowed")
+    else:
+        print("release audit passed: no likely secrets, PII, local paths, or remotes")
 
 
 if __name__ == "__main__":
     main()
-
