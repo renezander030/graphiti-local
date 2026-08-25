@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.egg-info/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+coverage.xml
+htmlcov/
+workspace/
+*.ladybug
+*.lbug
+

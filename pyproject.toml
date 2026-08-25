@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kg-mcp"
+version = "0.1.0"
+description = "A small, read-only MCP and CLI for temporal knowledge graphs"
+readme = "README.md"
+requires-python = ">=3.10,<4"
+license = { text = "Apache-2.0" }
+keywords = ["knowledge-graph", "mcp", "graphiti", "falkordb", "ladybugdb"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "filelock>=3.16,<4",
+  "graphiti-core[falkordb]==0.29.3",
+  "ladybug>=0.19.1,<1",
+  "mcp>=1.27,<2",
+  "pydantic>=2.11,<3",
+  "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.26,<1",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+kg = "kg_mcp.cli:main"
+kg-mcp = "kg_mcp.server:main"
+kg-ingest = "kg_mcp.ingest:main"
+kg-workspace = "kg_mcp.workspace:main"
+kg-ladybug-setup = "kg_mcp.ladybug:setup_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kg_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+

@@ -1,0 +1,26 @@
+server:
+  transport: stdio
+  host: 127.0.0.1
+  port: 8000
+
+graph:
+  groups: [example]
+  workspace_dir: ${KG_WORKSPACE_DIR:./workspace}
+
+database:
+  provider: ladybug
+  ladybug:
+    path: ./workspace/example.ladybug
+
+llm:
+  model: ${KG_LLM_MODEL:gpt-4.1-mini}
+  api_url: ${KG_LLM_API_URL:https://api.openai.com/v1}
+  api_key: ${OPENAI_API_KEY:}
+  structured_output_mode: json_schema
+
+embedder:
+  model: ${KG_EMBEDDER_MODEL:text-embedding-3-small}
+  dimensions: 1536
+  api_url: ${KG_EMBEDDER_API_URL:https://api.openai.com/v1}
+  api_key: ${OPENAI_API_KEY:}
+
