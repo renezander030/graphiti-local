@@ -1,8 +1,13 @@
-# KG-MCP
+# Graphiti Local
 
-KG-MCP is a small, read-first interface to temporal knowledge graphs. It gives
-agents six MCP retrieval tools, a matching `kg` command-line interface, and a
-human-gated path for adding facts.
+**Local-first temporal knowledge graph.**
+
+Graphiti Local is a small, read-first interface that gives agents six MCP
+retrieval tools, a matching `kg` command-line interface, and a human-gated path
+for adding facts.
+
+> Graphiti Local is an independent community project built on Graphiti. It is
+> not affiliated with or endorsed by Zep.
 
 This is a standalone package. It depends on `graphiti-core`; it does not contain
 Graphiti's repository, README, images, examples, or Git history.
@@ -43,10 +48,10 @@ Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are recommended.
 ```bash
 uv sync --extra dev
 cp config/falkordb.example.yaml config/falkordb.yaml
-export KG_MCP_CONFIG="$PWD/config/falkordb.yaml"
+export GRAPHITI_LOCAL_CONFIG="$PWD/config/falkordb.yaml"
 export OPENAI_API_KEY="..."
 uv run kg status
-uv run kg-mcp
+uv run graphiti-local
 ```
 
 For an MCP client using stdio:
@@ -56,8 +61,10 @@ For an MCP client using stdio:
   "mcpServers": {
     "kg": {
       "command": "uv",
-      "args": ["--directory", "/path/to/kg-mcp", "run", "kg-mcp"],
-      "env": {"KG_MCP_CONFIG": "/path/to/kg-mcp/config/falkordb.yaml"}
+      "args": ["--directory", "/path/to/graphiti-local", "run", "graphiti-local"],
+      "env": {
+        "GRAPHITI_LOCAL_CONFIG": "/path/to/graphiti-local/config/falkordb.yaml"
+      }
     }
   }
 }
@@ -69,7 +76,7 @@ provides an embedded single-file backend:
 
 ```bash
 cp config/ladybug.example.yaml config/ladybug.yaml
-export KG_MCP_CONFIG="$PWD/config/ladybug.yaml"
+export GRAPHITI_LOCAL_CONFIG="$PWD/config/ladybug.yaml"
 uv run kg-ladybug-setup --database ./workspace/example.ladybug
 # Review the dry run, then repeat with --apply in a network-enabled environment.
 ```

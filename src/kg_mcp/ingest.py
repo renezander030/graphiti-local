@@ -1,4 +1,4 @@
-"""Explicit, dry-run-by-default JSONL ingestion for KG-MCP."""
+"""Explicit, dry-run-by-default JSONL ingestion for Graphiti Local."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ async def ingest_records(records: list[dict[str, Any]], *, apply: bool) -> int:
                 name=str(record["name"]).strip(),
                 episode_body=str(record["body"]).strip(),
                 source=EpisodeType.text,
-                source_description=str(record.get("provenance") or "kg-mcp JSONL import"),
+                source_description=str(record.get("provenance") or "Graphiti Local JSONL import"),
                 reference_time=_reference_time(record.get("valid_at")),
                 group_id=None if settings.database.provider == "ladybug" else domain,
             )

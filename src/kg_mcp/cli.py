@@ -1,4 +1,4 @@
-"""Read-first command-line interface for KG-MCP."""
+"""Read-first command-line interface for Graphiti Local."""
 
 from __future__ import annotations
 

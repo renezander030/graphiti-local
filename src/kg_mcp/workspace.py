@@ -156,7 +156,7 @@ async def drain(*, apply: bool) -> int:
             "domain": item["domain"],
             "valid_at": item["created_at"],
             "provenance": (
-                f"kg-mcp workspace; {item['fact_type']}; "
+                f"Graphiti Local workspace; {item['fact_type']}; "
                 f"{item.get('provenance') or 'unspecified'}"
             ),
         }

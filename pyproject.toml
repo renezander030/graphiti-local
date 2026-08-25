@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "kg-mcp"
+name = "graphiti-local"
 version = "0.1.0"
-description = "A small, read-only MCP and CLI for temporal knowledge graphs"
+description = "A local-first temporal knowledge graph with a read-only MCP server and CLI"
 readme = "README.md"
 requires-python = ">=3.10,<4"
 license = { text = "Apache-2.0" }
@@ -36,7 +36,7 @@ dev = [
 
 [project.scripts]
 kg = "kg_mcp.cli:main"
-kg-mcp = "kg_mcp.server:main"
+graphiti-local = "kg_mcp.server:main"
 kg-ingest = "kg_mcp.ingest:main"
 kg-workspace = "kg_mcp.workspace:main"
 kg-ladybug-setup = "kg_mcp.ladybug:setup_main"
@@ -54,4 +54,3 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-

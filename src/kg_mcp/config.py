@@ -98,7 +98,12 @@ class Settings(BaseModel):
 
 
 def config_path(explicit: str | Path | None = None) -> Path:
-    raw = explicit or os.environ.get("KG_MCP_CONFIG", "config/falkordb.yaml")
+    raw = (
+        explicit
+        or os.environ.get("GRAPHITI_LOCAL_CONFIG")
+        or os.environ.get("KG_MCP_CONFIG")
+        or "config/falkordb.yaml"
+    )
     return Path(raw).expanduser().resolve()
 
 

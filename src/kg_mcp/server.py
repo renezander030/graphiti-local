@@ -1,4 +1,4 @@
-"""Read-only MCP server for KG-MCP."""
+"""Read-only MCP server for Graphiti Local."""
 
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
 
     selected = settings
     mcp = FastMCP(
-        "KG-MCP",
+        "Graphiti Local",
         instructions="Read-only access to an allow-listed temporal knowledge graph.",
         host=selected.server.host if selected else "127.0.0.1",
         port=selected.server.port if selected else 8000,
@@ -112,7 +112,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
 
     def runtime() -> tuple[Any, Settings]:
         if "graph" not in state:
-            raise RuntimeError("KG-MCP runtime is not initialized")
+            raise RuntimeError("Graphiti Local runtime is not initialized")
         return state["graph"], state["settings"]
 
     @mcp.tool()
@@ -296,7 +296,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             await graph.driver.execute_query("MATCH (n) RETURN count(n) AS count")
             return {
                 "status": "ok",
-                "message": f"KG-MCP is connected to {active.database.provider}",
+                "message": f"Graphiti Local is connected to {active.database.provider}",
             }
         except Exception as exc:
             logger.exception("status check failed")
@@ -310,7 +310,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path)
     args = parser.parse_args()
     if args.config:
-        os.environ["KG_MCP_CONFIG"] = str(args.config.resolve())
+        os.environ["GRAPHITI_LOCAL_CONFIG"] = str(args.config.resolve())
     settings = load_config()
     create_server(settings).run(transport=settings.server.transport)
 

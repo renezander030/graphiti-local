@@ -1,4 +1,4 @@
-"""Construct Graphiti clients from KG-MCP's compact configuration."""
+"""Construct Graphiti clients from Graphiti Local's compact configuration."""
 
 from __future__ import annotations
 
