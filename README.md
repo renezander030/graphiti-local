@@ -184,6 +184,20 @@ uv run python scripts/release_audit.py .
 See [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md), and
 [UPSTREAM.md](UPSTREAM.md) for the deployment and provenance boundaries.
 
+## Related tools
+
+The propose/approve/drain boundary here is one instance of a pattern used across a few
+sibling projects:
+
+- [agent-approval-gate](https://github.com/renezander030/agent-approval-gate) — the same
+  draft/validate/approve boundary as a standalone pattern, without a graph behind it.
+- [skillgate](https://github.com/renezander030/skillgate) — deterministic finish-line
+  gates for agent output, the check that runs before something ships.
+- [action-mcp-test](https://github.com/renezander030/action-mcp-test) — a GitHub Action
+  that tests MCP servers in CI for protocol compliance and schema validation.
+- [agentic-task-system](https://github.com/renezander030/agentic-task-system) — a task
+  layer for agent context that can read this graph over the same `kg` CLI.
+
 ## License
 
 Apache-2.0.
