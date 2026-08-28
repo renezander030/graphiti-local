@@ -7,6 +7,7 @@ sets a non-zero exit code, so a missing optional extra warns without blocking a 
 from __future__ import annotations
 
 import json
+import os
 import socket
 import urllib.error
 import urllib.request
@@ -180,6 +181,29 @@ def check_transport(settings: Settings) -> dict[str, str]:
     )
 
 
+def check_embedding_dim_binding(settings: Settings) -> dict[str, str]:
+    """Catch an import-order regression around graphiti's EMBEDDING_DIM constant.
+
+    graphiti reads EMBEDDING_DIM from the environment once, at import time, and uses that
+    constant to build zero vectors during search. If anything imports graphiti before the
+    value is set, searches are built at the wrong width while the embedder returns the
+    right one, and the failure is silent.
+    """
+    os.environ.setdefault("EMBEDDING_DIM", str(settings.embedder.dimensions))
+    try:
+        from graphiti_core.embedder.client import EMBEDDING_DIM
+    except Exception as exc:
+        return _check("embedding-dim-binding", WARN, f"not determined: {exc}")
+    if settings.embedder.dimensions != EMBEDDING_DIM:
+        return _check(
+            "embedding-dim-binding",
+            FAIL,
+            f"graphiti resolved EMBEDDING_DIM={EMBEDDING_DIM} but embedder.dimensions is "
+            f"{settings.embedder.dimensions}; graphiti was imported before the value was set",
+        )
+    return _check("embedding-dim-binding", OK, f"graphiti uses {EMBEDDING_DIM} dimensions")
+
+
 def check_embedding_model_known(settings: Settings) -> dict[str, str]:
     base = embedding_model_base(settings.embedder.model)
     if base in KNOWN_EMBEDDING_DIMENSIONS:
@@ -199,6 +223,7 @@ def run_checks(explicit: str | None = None, *, offline: bool = False) -> list[di
     results.append(check_transport(settings))
     results.append(check_reranker(settings))
     results.append(check_embedding_model_known(settings))
+    results.append(check_embedding_dim_binding(settings))
     if offline:
         results.append(_check("database", WARN, "skipped (--offline)"))
         results.append(_check("llm", WARN, "skipped (--offline)"))

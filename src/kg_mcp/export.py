@@ -85,7 +85,7 @@ async def export_graph(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider,
         "groups": groups,
-        "embeddings": "omitted; recreated on import",
+        "embeddings": "omitted; derived from the text under the embedder in use",
     }
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("w", encoding="utf-8") as handle:

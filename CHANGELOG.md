@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1
+
+- `kg doctor` gains an `embedding-dim-binding` check. graphiti reads `EMBEDDING_DIM`
+  from the environment once, at import time, and uses that constant to build zero
+  vectors during search. If anything imports graphiti before the value is set, searches
+  are built at the wrong width while the embedder returns the right one, and nothing
+  reports it. The check compares the constant graphiti actually resolved against
+  `embedder.dimensions`. This matters most on the local profile, where
+  `nomic-embed-text` is 768 and graphiti's own default is 1024.
+- The export header no longer implies an import command exists; embeddings are omitted
+  because they are derived from the text under whichever embedder is in use.
+
 ## 0.2.0 — Runs unattended
 
 v0.1.0 was read-first and human-gated, but it assumed a human at the keyboard: output

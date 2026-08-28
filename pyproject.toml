@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphiti-local"
-version = "0.2.0"
+version = "0.2.1"
 description = "A local-first temporal knowledge graph with a read-only MCP server and CLI"
 readme = "README.md"
 requires-python = ">=3.10,<4"
