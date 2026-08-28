@@ -1,0 +1,43 @@
+# Fully local: no OpenAI key, no data leaving the machine.
+#
+#   ollama pull qwen2.5:7b
+#   ollama pull nomic-embed-text
+#
+# Ollama exposes an OpenAI-compatible API on /v1, so both clients point at it.
+# structured_output_mode is json_object because most local models do not implement
+# the strict json_schema response format.
+#
+# The embedder dimensions below MUST match the model: nomic-embed-text returns 768,
+# not the 1536 the OpenAI default assumes. `kg doctor` probes the live endpoint and
+# fails when the two disagree, because a mismatch corrupts stored vectors silently.
+
+server:
+  transport: stdio
+  host: 127.0.0.1
+  port: 8000
+
+graph:
+  groups: [example]
+  workspace_dir: ${KG_WORKSPACE_DIR:./workspace}
+
+database:
+  provider: ladybug
+  ladybug:
+    path: ${KG_LADYBUG_PATH:./workspace/graph.ladybug}
+
+llm:
+  model: ${KG_LLM_MODEL:qwen2.5:7b}
+  api_url: ${KG_LLM_API_URL:http://127.0.0.1:11434/v1}
+  api_key: ${KG_LLM_API_KEY:ollama}
+  structured_output_mode: json_object
+
+embedder:
+  model: ${KG_EMBEDDER_MODEL:nomic-embed-text}
+  dimensions: 768
+  api_url: ${KG_EMBEDDER_API_URL:http://127.0.0.1:11434/v1}
+  api_key: ${KG_EMBEDDER_API_KEY:ollama}
+
+reranker:
+  # 'passthrough' makes no extra model call. 'bge' reranks locally and needs
+  # the optional extra: uv sync --extra rerank
+  provider: ${KG_RERANKER:passthrough}

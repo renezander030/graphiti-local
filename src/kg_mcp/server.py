@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -305,14 +306,63 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     return mcp
 
 
+class BearerTokenMiddleware:
+    """Require a bearer token on every HTTP request before it reaches a tool.
+
+    stdio is a private pipe, but the network transport is reachable by anything that can
+    open the port, so it is gated here. The comparison is constant-time: a byte-by-byte
+    early exit would leak the token one character at a time.
+
+    The SDK also offers a first-class ``TokenVerifier`` hook, but it expects OAuth
+    resource metadata (issuer and resource-server URLs) that a single shared local token
+    does not have. Wrapping the ASGI app keeps the configuration to one secret.
+    """
+
+    def __init__(self, app: Any, token: str) -> None:
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        if not hmac.compare_digest(headers.get(b"authorization", b""), self.expected):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"www-authenticate", b"Bearer"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
+            return
+        await self.app(scope, receive, send)
+
+
+def serve(settings: Settings) -> None:
+    server = create_server(settings)
+    if settings.server.transport != "streamable-http":
+        server.run(transport=settings.server.transport)
+        return
+    import uvicorn
+
+    # Config validation already refuses this transport without a token, so the gate
+    # cannot be skipped by omitting configuration.
+    app = BearerTokenMiddleware(server.streamable_http_app(), settings.server.auth.token)
+    uvicorn.run(app, host=settings.server.host, port=settings.server.port)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
     args = parser.parse_args()
     if args.config:
         os.environ["GRAPHITI_LOCAL_CONFIG"] = str(args.config.resolve())
-    settings = load_config()
-    create_server(settings).run(transport=settings.server.transport)
+    serve(load_config())
 
 
 if __name__ == "__main__":

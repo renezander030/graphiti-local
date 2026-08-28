@@ -11,6 +11,38 @@ def _is_official_openai(url: str) -> bool:
     return url.rstrip("/") in {"https://api.openai.com", "https://api.openai.com/v1"}
 
 
+def build_reranker(settings: Settings):
+    """Choose a cross-encoder. 'passthrough' stays the default: it costs no extra call.
+
+    The concrete upstream clients are imported lazily because the bge and gemini modules
+    import their third-party dependency eagerly at module load.
+    """
+    provider = settings.reranker.provider
+    if provider == "passthrough":
+        from kg_mcp.reranker import PassthroughReranker
+
+        return PassthroughReranker()
+    if provider == "bge":
+        from graphiti_core.cross_encoder.bge_reranker_client import BGERerankerClient
+
+        return BGERerankerClient()
+
+    from graphiti_core.llm_client.config import LLMConfig
+
+    config = LLMConfig(
+        api_key=settings.reranker.api_key or None,
+        base_url=settings.reranker.api_url or None,
+        model=settings.reranker.model or None,
+    )
+    if provider == "openai":
+        from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+
+        return OpenAIRerankerClient(config=config)
+    from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
+
+    return GeminiRerankerClient(config=config)
+
+
 def build_graphiti(settings: Settings, *, read_only: bool):
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     os.environ.setdefault("EMBEDDING_DIM", str(settings.embedder.dimensions))
@@ -46,12 +78,10 @@ def build_graphiti(settings: Settings, *, read_only: bool):
         )
     )
 
-    from kg_mcp.reranker import PassthroughReranker
-
     kwargs = {
         "llm_client": llm,
         "embedder": embedder,
-        "cross_encoder": PassthroughReranker(),
+        "cross_encoder": build_reranker(settings),
     }
     provider = settings.database.provider
     if provider == "falkordb":

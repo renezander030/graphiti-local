@@ -1,9 +1,15 @@
-"""Explicit, dry-run-by-default JSONL ingestion for Graphiti Local."""
+"""Explicit, dry-run-by-default JSONL ingestion for Graphiti Local.
+
+Ingestion is resumable. Each applied record is recorded in a content-keyed ledger, so
+a re-run skips what already landed instead of duplicating it, and one failing record
+no longer costs the whole batch.
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,23 +17,30 @@ from typing import Any
 
 from kg_mcp.config import allowed_groups, load_config
 
+LEDGER = "ingest-ledger.jsonl"
 
-def read_records(path: Path) -> list[dict[str, Any]]:
+
+def read_records(path: Path, *, skip_invalid: bool = False) -> list[dict[str, Any]]:
     records = []
-    with path.open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.strip():
+    for line_number, line in enumerate(path.open(encoding="utf-8"), 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if skip_invalid:
                 continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SystemExit(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
-            if not isinstance(record, dict):
-                raise SystemExit(f"{path}:{line_number}: each line must be an object")
-            missing = [name for name in ("name", "body") if not str(record.get(name, "")).strip()]
-            if missing:
-                raise SystemExit(f"{path}:{line_number}: missing {', '.join(missing)}")
-            records.append(record)
+            raise SystemExit(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
+        if not isinstance(record, dict):
+            if skip_invalid:
+                continue
+            raise SystemExit(f"{path}:{line_number}: each line must be an object")
+        missing = [name for name in ("name", "body") if not str(record.get(name, "")).strip()]
+        if missing:
+            if skip_invalid:
+                continue
+            raise SystemExit(f"{path}:{line_number}: missing {missing[0]}")
+        records.append(record)
     return records
 
 
@@ -38,46 +51,186 @@ def _reference_time(value: str | None) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-async def ingest_records(records: list[dict[str, Any]], *, apply: bool) -> int:
+def record_key(record: dict[str, Any], domain: str) -> str:
+    """Content hash so a re-run recognises a record it already ingested."""
+    material = "\x1f".join(
+        [
+            domain,
+            str(record.get("name", "")).strip(),
+            str(record.get("body", "")).strip(),
+            str(record.get("valid_at") or ""),
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def _ledger_path() -> Path:
+    from kg_mcp.workspace import workspace_dir
+
+    return workspace_dir() / LEDGER
+
+
+def completed_keys() -> set[str]:
+    path = _ledger_path()
+    if not path.exists():
+        return set()
+    keys = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and entry.get("key"):
+            keys.add(entry["key"])
+    return keys
+
+
+def _record_completed(key: str, domain: str, name: str) -> None:
+    from filelock import FileLock
+
+    from kg_mcp.workspace import workspace_dir
+
+    directory = workspace_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "key": key,
+        "domain": domain,
+        "name": name,
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with (
+        FileLock(str(directory / ".lock")),
+        (directory / LEDGER).open("a", encoding="utf-8") as handle,
+    ):
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+async def ingest_records(
+    records: list[dict[str, Any]],
+    *,
+    apply: bool,
+    resume: bool = True,
+    fail_fast: bool = False,
+    ledger: bool = True,
+) -> dict[str, Any]:
     settings = load_config()
     for record in records:
         domain = str(record.get("domain") or settings.graph.groups[0])
         allowed_groups(domain, settings)
+
+    seen = completed_keys() if (resume and ledger) else set()
+    planned, skipped = [], 0
+    for record in records:
+        domain = str(record.get("domain") or settings.graph.groups[0])
+        key = record_key(record, domain)
+        if key in seen:
+            skipped += 1
+            continue
+        planned.append((record, domain, key))
+
     if not apply:
-        for record in records:
-            domain = record.get("domain") or settings.graph.groups[0]
-            print(f"would ingest [{domain}] {record['name']}")
-        return 0
+        return {
+            "applied": False,
+            "planned": [{"domain": d, "name": r["name"]} for r, d, _ in planned],
+            "skipped": skipped,
+            "ingested": 0,
+            "failed": [],
+        }
 
     from graphiti_core.nodes import EpisodeType
 
     from kg_mcp.runtime import build_graphiti
 
     graph = build_graphiti(settings, read_only=False)
-    completed = 0
+    ingested, failures = 0, []
     try:
         await graph.build_indices_and_constraints()
-        for record in records:
-            domain = str(record.get("domain") or settings.graph.groups[0])
-            await graph.add_episode(
-                name=str(record["name"]).strip(),
-                episode_body=str(record["body"]).strip(),
-                source=EpisodeType.text,
-                source_description=str(record.get("provenance") or "Graphiti Local JSONL import"),
-                reference_time=_reference_time(record.get("valid_at")),
-                group_id=None if settings.database.provider == "ladybug" else domain,
-            )
-            completed += 1
-        return completed
+        for record, domain, key in planned:
+            try:
+                await graph.add_episode(
+                    name=str(record["name"]).strip(),
+                    episode_body=str(record["body"]).strip(),
+                    source=EpisodeType.text,
+                    source_description=str(
+                        record.get("provenance") or "Graphiti Local JSONL import"
+                    ),
+                    reference_time=_reference_time(record.get("valid_at")),
+                    group_id=None if settings.database.provider == "ladybug" else domain,
+                )
+            except Exception as exc:  # one bad episode must not cost the batch
+                failures.append({"name": record["name"], "domain": domain, "error": str(exc)})
+                if fail_fast:
+                    break
+                continue
+            if ledger:
+                _record_completed(key, domain, str(record["name"]).strip())
+            ingested += 1
     finally:
         await graph.close()
+    return {
+        "applied": True,
+        "ingested": ingested,
+        "skipped": skipped,
+        "failed": failures,
+        "planned": [],
+    }
 
 
 def main() -> None:
+    from kg_mcp.output import emit, fail
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("-H", "--human", action="store_true")
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="ingest every record even if the ledger already recorded it",
+    )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="stop at the first failing record instead of isolating it",
+    )
+    parser.add_argument("--skip-invalid", action="store_true", help="ignore malformed input lines")
     args = parser.parse_args()
-    records = read_records(args.input)
-    count = asyncio.run(ingest_records(records, apply=args.apply))
-    print(f"{count} episode(s) ingested" if args.apply else f"{len(records)} episode(s) validated")
+    as_json = not args.human
+    try:
+        records = read_records(args.input, skip_invalid=args.skip_invalid)
+        result = asyncio.run(
+            ingest_records(
+                records,
+                apply=args.apply,
+                resume=not args.no_resume,
+                fail_fast=args.fail_fast,
+            )
+        )
+    except ValueError as exc:
+        fail(str(exc), code=2, as_json=as_json)
+        return
+    result["total"] = len(records)
+
+    def human() -> list[str]:
+        if not result["applied"]:
+            lines = [
+                f"would ingest [{item['domain']}] {item['name']}" for item in result["planned"]
+            ]
+            lines.append(
+                f"{len(result['planned'])} episode(s) validated, "
+                f"{result['skipped']} already ingested"
+            )
+            return lines
+        lines = [f"{result['ingested']} episode(s) ingested, {result['skipped']} skipped"]
+        lines.extend(f"FAILED [{f['domain']}] {f['name']}: {f['error']}" for f in result["failed"])
+        return lines
+
+    emit(result, human=human, as_json=as_json)
+    if result["failed"]:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

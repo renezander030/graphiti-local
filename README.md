@@ -35,11 +35,37 @@ kg edge UUID
 kg status
 kg pending [group]
 kg propose GROUP "fact" --type source-fact --provenance "source"
+kg doctor [--offline]
+kg export [group ...] [--output PATH]
+kg verify [--offline]
 ```
 
 `propose` appends to a local JSONL queue. It does not modify the graph. A human
 uses `kg-workspace approve`, reviews the dry run from `kg-workspace drain`, and
 adds `--apply` only when the proposal is ready.
+
+## Built for unattended use
+
+Every command prints JSON on stdout and exits non-zero when it refuses, so a cron
+job or an agent can consume a result without scraping text or guessing whether a
+call succeeded. Add `-H`/`--human` for the reader-friendly form.
+
+```bash
+kg ask "what changed last week" | jq -r '.facts[].fact'
+
+kg propose unconfigured-group "a fact"; echo $?   # 2 — refused, nothing queued
+```
+
+Before a run depends on the configuration, prove it:
+
+```bash
+kg doctor          # config, workspace, backend, LLM, and a live embedding-width probe
+kg verify          # the six read tools, no write tools, and live retrieval
+```
+
+`kg doctor` probes the embedder endpoint and fails when the vector width it returns
+disagrees with `embedder.dimensions`. That mismatch is otherwise silent, and it
+corrupts every embedding it writes.
 
 ## Quick start
 
@@ -83,6 +109,24 @@ uv run kg-ladybug-setup --database ./workspace/example.ladybug
 
 Opening a Ladybug graph never installs extensions automatically.
 
+## Running without a cloud provider
+
+`config/ollama.example.yaml` runs the graph entirely on your machine — a local model
+for extraction, a local embedder, and the embedded Ladybug backend. No API key, no
+data leaving the host:
+
+```bash
+ollama pull qwen2.5:7b && ollama pull nomic-embed-text
+cp config/ollama.example.yaml config/ollama.yaml
+export GRAPHITI_LOCAL_CONFIG="$PWD/config/ollama.yaml"
+uv run kg doctor
+```
+
+Ollama speaks the OpenAI API on `/v1`, so both clients point at it.
+`structured_output_mode: json_object` suits local models, which mostly do not
+implement the strict `json_schema` response format. Mind the vector width:
+`nomic-embed-text` returns 768, not the 1536 an OpenAI default assumes.
+
 ## Explicit ingestion
 
 Ingestion is a separate command and is dry-run by default:
@@ -95,15 +139,39 @@ uv run kg-ingest examples/synthetic_episodes.jsonl --apply
 Inputs are UTF-8 JSONL objects with `name` and `body`; `domain`, `valid_at`, and
 `provenance` are optional. A requested domain must be in `graph.groups`.
 
+Ingestion is resumable. Each applied record is written to a content-keyed ledger in
+the workspace, so re-running the same file ingests only what has not landed yet
+instead of duplicating it. A record that fails is isolated and reported; the rest of
+the batch still lands, and the failure sets a non-zero exit code. Use `--no-resume`
+to ignore the ledger and `--fail-fast` for the old stop-at-first-error behaviour.
+
+## Portability
+
+```bash
+kg export                                    # every group, to a timestamped JSONL file
+kg export example --output ./snapshot.jsonl  # a named group to a chosen path
+```
+
+The snapshot is written from the graphiti models rather than backend rows, so it is
+readable whichever backend produced it. Embeddings are omitted deliberately: they are
+derived from the text, and a vector restored under a different embedding model would
+be silently wrong.
+
 ## Safety model
 
 - Graphiti telemetry is disabled before its package is imported.
 - HTTP defaults to loopback; stdio is the example default.
-- Configured graph groups form an access allow-list.
+- The `streamable-http` transport refuses to start without `server.auth.token`,
+  and every request over it must carry that bearer token. stdio is a private pipe;
+  a network port is reachable by anything that can open it.
+- Configured graph groups form an access allow-list, enforced on reads *and* on
+  `kg propose`. A fact addressed to an unconfigured group is refused, not queued.
 - Credentials remain environment variables.
 - MCP cannot write or delete.
 - Ingestion requires an explicit command and `--apply`.
 - Proposal approval and application are separate human actions.
+- `kg-workspace drain` archives a proposal only after it actually lands. A failed
+  ingest leaves it approved so the next drain retries it.
 
 Run the release gate before sharing:
 

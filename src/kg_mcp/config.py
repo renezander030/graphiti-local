@@ -26,10 +26,52 @@ def _expand(value: Any) -> Any:
     return value
 
 
+GROUP_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+# Vector width per embedding model. A mismatch between the model's real output and the
+# configured width corrupts the graph silently, so a known name that disagrees is fatal.
+KNOWN_EMBEDDING_DIMENSIONS = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+    "nomic-embed-text": 768,
+    "mxbai-embed-large": 1024,
+    "all-minilm": 384,
+    "bge-m3": 1024,
+    "snowflake-arctic-embed": 1024,
+}
+
+
+def embedding_model_base(model: str) -> str:
+    """Strip an Ollama-style ``:tag`` so ``nomic-embed-text:latest`` matches its entry."""
+    return model.split(":", 1)[0].strip()
+
+
+class AuthConfig(BaseModel):
+    """Bearer-token gate for the network transport. Ignored by stdio."""
+
+    token: str = ""
+    groups: list[str] = Field(default_factory=list)
+
+
 class ServerConfig(BaseModel):
     transport: Literal["stdio", "streamable-http"] = "stdio"
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
+
+    @model_validator(mode="after")
+    def validate_network_exposure(self) -> ServerConfig:
+        if self.transport != "streamable-http":
+            return self
+        if not self.auth.token:
+            raise ValueError(
+                "server.transport 'streamable-http' requires server.auth.token; "
+                "an unauthenticated network transport exposes every configured group"
+            )
+        if len(self.auth.token) < 16:
+            raise ValueError("server.auth.token must be at least 16 characters")
+        return self
 
 
 class GraphConfig(BaseModel):
@@ -38,10 +80,9 @@ class GraphConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_groups(self) -> GraphConfig:
-        pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
         if len(set(self.groups)) != len(self.groups):
             raise ValueError("graph groups must be unique")
-        invalid = [group for group in self.groups if not pattern.fullmatch(group)]
+        invalid = [group for group in self.groups if not GROUP_PATTERN.fullmatch(group)]
         if invalid:
             raise ValueError(f"invalid graph group: {invalid[0]}")
         return self
@@ -61,6 +102,32 @@ class LLMConfig(OpenAIConfig):
 
 class EmbedderConfig(OpenAIConfig):
     dimensions: int = Field(default=1536, ge=1)
+
+    @model_validator(mode="after")
+    def validate_dimensions(self) -> EmbedderConfig:
+        expected = KNOWN_EMBEDDING_DIMENSIONS.get(embedding_model_base(self.model))
+        if expected is not None and expected != self.dimensions:
+            raise ValueError(
+                f"embedder.model '{self.model}' returns {expected}-dimensional vectors "
+                f"but embedder.dimensions is {self.dimensions}; "
+                "a mismatch corrupts stored embeddings silently"
+            )
+        return self
+
+
+class RerankerConfig(BaseModel):
+    """Result reranking. 'passthrough' is the default and makes no extra model call."""
+
+    provider: Literal["passthrough", "bge", "openai", "gemini"] = "passthrough"
+    model: str = ""
+    api_url: str = ""
+    api_key: str = ""
+
+    @model_validator(mode="after")
+    def validate_credentials(self) -> RerankerConfig:
+        if self.provider in {"openai", "gemini"} and not self.api_key:
+            raise ValueError(f"reranker.provider '{self.provider}' requires reranker.api_key")
+        return self
 
 
 class FalkorConfig(BaseModel):
@@ -95,6 +162,7 @@ class Settings(BaseModel):
     embedder: EmbedderConfig = Field(
         default_factory=lambda: EmbedderConfig(model="text-embedding-3-small")
     )
+    reranker: RerankerConfig = Field(default_factory=RerankerConfig)
 
 
 def config_path(explicit: str | Path | None = None) -> Path:

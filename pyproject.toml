@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphiti-local"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local-first temporal knowledge graph with a read-only MCP server and CLI"
 readme = "README.md"
 requires-python = ">=3.10,<4"
@@ -33,6 +33,9 @@ dev = [
   "pytest-asyncio>=0.26,<1",
   "ruff>=0.12,<1",
 ]
+# Local cross-encoder reranking. Optional because it pulls torch transitively;
+# the default 'passthrough' reranker needs nothing extra.
+rerank = ["sentence-transformers>=3.2.1,<6"]
 
 [project.scripts]
 kg = "kg_mcp.cli:main"
