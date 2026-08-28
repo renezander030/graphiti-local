@@ -105,6 +105,66 @@ def test_skip_invalid_tolerates_malformed_lines(tmp_path: Path):
         read_records(source)
 
 
+# --- a termination signal must stop cleanly, not mid-write ---
+
+
+def test_sigterm_is_turned_into_a_stop_request():
+    import os
+    import signal
+
+    from kg_mcp.ingest import _stop_on_signal
+
+    with _stop_on_signal() as stop:
+        assert stop["requested"] is False
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert stop["requested"] is True, "SIGTERM must be captured, not kill the process"
+
+
+def test_previous_signal_handlers_are_restored():
+    import signal
+
+    from kg_mcp.ingest import _stop_on_signal
+
+    original = signal.getsignal(signal.SIGTERM)
+    with _stop_on_signal():
+        assert signal.getsignal(signal.SIGTERM) is not original
+    assert signal.getsignal(signal.SIGTERM) is original
+
+
+def test_stop_request_halts_before_the_next_record(configured, monkeypatch):
+    """The loop must break at a record boundary rather than abandon a write."""
+    from kg_mcp import ingest
+
+    calls = []
+
+    class FakeGraph:
+        driver = None
+
+        async def build_indices_and_constraints(self):
+            return None
+
+        async def add_episode(self, **kwargs):
+            calls.append(kwargs["name"])
+            # Ask for shutdown while the first record is in flight.
+            import os
+            import signal
+
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        async def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr(ingest, "build_graphiti", lambda *a, **k: FakeGraph(), raising=False)
+    monkeypatch.setattr(
+        "kg_mcp.runtime.build_graphiti", lambda *a, **k: FakeGraph(), raising=False
+    )
+    result = asyncio.run(ingest.ingest_records(RECORDS, apply=True, ledger=False))
+
+    assert result["interrupted"] is True
+    assert result["ingested"] == 1, "the record in flight completes, the next one does not start"
+    assert calls[-1] == "closed", "the driver must be closed on the way out"
+
+
 # --- the drain safety rule: never archive a proposal that did not land ---
 
 

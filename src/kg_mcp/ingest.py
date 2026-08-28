@@ -11,6 +11,8 @@ import argparse
 import asyncio
 import hashlib
 import json
+import signal
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -107,6 +109,37 @@ def _record_completed(key: str, domain: str, name: str) -> None:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+@contextmanager
+def _stop_on_signal():
+    """Turn SIGTERM/SIGINT into a stop request honoured at the next record boundary.
+
+    An unattended run is usually wrapped in a timeout. Dying mid-write leaves an
+    embedded backend with a partial write it may refuse to reopen, so a termination
+    signal finishes the record in flight, closes the driver, and exits.
+    """
+    state = {"requested": False}
+
+    def request_stop(signum, frame):
+        del signum, frame
+        state["requested"] = True
+
+    previous = {}
+    for number in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous[number] = signal.signal(number, request_stop)
+        except (ValueError, OSError):
+            # Not the main thread, or the platform lacks the signal; nothing to restore.
+            continue
+    try:
+        yield state
+    finally:
+        for number, handler in previous.items():
+            try:
+                signal.signal(number, handler)
+            except (ValueError, OSError):
+                continue
+
+
 async def ingest_records(
     records: list[dict[str, Any]],
     *,
@@ -137,6 +170,7 @@ async def ingest_records(
             "skipped": skipped,
             "ingested": 0,
             "failed": [],
+            "interrupted": False,
         }
 
     from graphiti_core.nodes import EpisodeType
@@ -144,36 +178,42 @@ async def ingest_records(
     from kg_mcp.runtime import build_graphiti
 
     graph = build_graphiti(settings, read_only=False)
-    ingested, failures = 0, []
+    ingested, failures, interrupted = 0, [], False
     try:
-        await graph.build_indices_and_constraints()
-        for record, domain, key in planned:
-            try:
-                await graph.add_episode(
-                    name=str(record["name"]).strip(),
-                    episode_body=str(record["body"]).strip(),
-                    source=EpisodeType.text,
-                    source_description=str(
-                        record.get("provenance") or "Graphiti Local JSONL import"
-                    ),
-                    reference_time=_reference_time(record.get("valid_at")),
-                    group_id=None if settings.database.provider == "ladybug" else domain,
-                )
-            except Exception as exc:  # one bad episode must not cost the batch
-                failures.append({"name": record["name"], "domain": domain, "error": str(exc)})
-                if fail_fast:
+        with _stop_on_signal() as stop:
+            await graph.build_indices_and_constraints()
+            for record, domain, key in planned:
+                if stop["requested"]:
+                    interrupted = True
                     break
-                continue
-            if ledger:
-                _record_completed(key, domain, str(record["name"]).strip())
-            ingested += 1
+                try:
+                    await graph.add_episode(
+                        name=str(record["name"]).strip(),
+                        episode_body=str(record["body"]).strip(),
+                        source=EpisodeType.text,
+                        source_description=str(
+                            record.get("provenance") or "Graphiti Local JSONL import"
+                        ),
+                        reference_time=_reference_time(record.get("valid_at")),
+                        group_id=None if settings.database.provider == "ladybug" else domain,
+                    )
+                except Exception as exc:  # one bad episode must not cost the batch
+                    failures.append({"name": record["name"], "domain": domain, "error": str(exc)})
+                    if fail_fast:
+                        break
+                    continue
+                if ledger:
+                    _record_completed(key, domain, str(record["name"]).strip())
+                ingested += 1
     finally:
+        # Always close: an embedded backend left with a partial write may refuse to reopen.
         await graph.close()
     return {
         "applied": True,
         "ingested": ingested,
         "skipped": skipped,
         "failed": failures,
+        "interrupted": interrupted,
         "planned": [],
     }
 
@@ -224,6 +264,8 @@ def main() -> None:
             )
             return lines
         lines = [f"{result['ingested']} episode(s) ingested, {result['skipped']} skipped"]
+        if result.get("interrupted"):
+            lines.append("stopped early on a termination signal; re-run to continue")
         lines.extend(f"FAILED [{f['domain']}] {f['name']}: {f['error']}" for f in result["failed"])
         return lines
 

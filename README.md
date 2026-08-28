@@ -145,6 +145,13 @@ instead of duplicating it. A record that fails is isolated and reported; the res
 the batch still lands, and the failure sets a non-zero exit code. Use `--no-resume`
 to ignore the ledger and `--fail-fast` for the old stop-at-first-error behaviour.
 
+`SIGTERM` and `SIGINT` stop it at a record boundary rather than mid-write: it finishes
+the record in flight, closes the driver, and reports `interrupted`. This matters when a
+cron job wraps the run in a `timeout` — extraction is slow on a local model, and a
+process killed mid-write can leave an embedded backend with a partial write it refuses
+to reopen. A signal cannot help against `SIGKILL` or a power cut, so take a snapshot
+with `kg export` before a long ingest into an embedded backend.
+
 ## Portability
 
 ```bash

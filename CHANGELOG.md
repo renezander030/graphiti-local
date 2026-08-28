@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.2
+
+- `kg-ingest` handles `SIGTERM` and `SIGINT`: it finishes the record in flight, closes
+  the driver, and reports `interrupted: true` so a re-run continues from the ledger.
+  Previously a wrapped `timeout` killed the process mid-write. On the embedded Ladybug
+  backend that could leave a partial write the database then refused to reopen
+  (`Storage exception: Checksum verification failed, the WAL file is corrupted`), which
+  took out every later read as well. This was found by an end-to-end run, not in review.
+
+  A signal cannot save you from `SIGKILL` or a power cut. Take a snapshot with
+  `kg export` before a long ingest into an embedded backend.
+
 ## 0.2.1
 
 - `kg doctor` gains an `embedding-dim-binding` check. graphiti reads `EMBEDDING_DIM`
