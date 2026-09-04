@@ -230,7 +230,16 @@ def main() -> None:
         )
         return
 
-    result = asyncio.run(drain(apply=args.apply))
+    from kg_mcp.output import fail
+
+    try:
+        result = asyncio.run(drain(apply=args.apply))
+    except ValueError as exc:  # a refused write, e.g. the embedder changed since the last one
+        fail(str(exc), code=2, as_json=as_json)
+        return
+    except (FileNotFoundError, RuntimeError) as exc:
+        fail(str(exc), as_json=as_json)
+        return
 
     def drain_human() -> list[str]:
         if not result["applied"]:

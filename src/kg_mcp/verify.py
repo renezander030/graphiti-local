@@ -51,15 +51,21 @@ async def check_tool_surface() -> list[dict[str, str]]:
 
 async def check_retrieval(query: str) -> list[dict[str, Any]]:
     from kg_mcp.config import allowed_groups, load_config
-    from kg_mcp.runtime import build_graphiti
+    from kg_mcp.runtime import bounded, build_graphiti
 
     settings = load_config()
-    graph = build_graphiti(settings, read_only=True)
+    timeout = settings.graph.query_timeout_seconds
+    try:
+        graph = build_graphiti(settings, read_only=True)
+    except Exception as exc:
+        return [_check("retrieval", FAIL, f"graph did not open: {exc}")]
     results: list[dict[str, Any]] = []
     try:
         groups = allowed_groups(None, settings)
         try:
-            facts = await graph.search(query, group_ids=groups, num_results=10)
+            facts = await bounded(
+                graph.search(query, group_ids=groups, num_results=10), timeout, "search"
+            )
         except Exception as exc:
             return [_check("retrieval", FAIL, f"search raised: {exc}")]
         if facts:
@@ -94,7 +100,11 @@ async def check_retrieval(query: str) -> list[dict[str, Any]]:
                 )
             else:
                 sample = invalidated[0]
-                current = await graph.search(sample.fact, group_ids=groups, num_results=10)
+                current = await bounded(
+                    graph.search(sample.fact, group_ids=groups, num_results=10),
+                    timeout,
+                    "search",
+                )
                 leaked = any(item.uuid == sample.uuid for item in current)
                 results.append(
                     _check(

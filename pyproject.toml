@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphiti-local"
-version = "0.2.2"
+version = "0.3.0"
 description = "A local-first temporal knowledge graph with a read-only MCP server and CLI"
 readme = "README.md"
 requires-python = ">=3.10,<4"
@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
   "filelock>=3.16,<4",
-  "graphiti-core[falkordb]==0.29.3",
+  "graphiti-core[falkordb]==0.30.1",
   "ladybug>=0.19.1,<1",
   "mcp>=1.27,<2",
   "pydantic>=2.11,<3",
@@ -50,6 +50,11 @@ packages = ["src/kg_mcp"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+  # Upstream deprecates its Kuzu driver; Graphiti Local keeps the Ladybug adapter on it
+  # deliberately (see UPSTREAM.md), so the warning carries no action for this suite.
+  "ignore:The Kuzu backend is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100

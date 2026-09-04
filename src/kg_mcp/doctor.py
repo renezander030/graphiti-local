@@ -51,6 +51,21 @@ def _get(url: str, api_key: str) -> int:
         return int(response.status)
 
 
+def check_versions() -> dict[str, str]:
+    """Every support question starts here: which versions are actually installed."""
+    import platform
+    from importlib import metadata
+
+    parts = []
+    for name in ("graphiti-local", "graphiti-core", "ladybug", "mcp"):
+        try:
+            parts.append(f"{name} {metadata.version(name)}")
+        except metadata.PackageNotFoundError:
+            parts.append(f"{name} not installed")
+    parts.append(f"python {platform.python_version()}")
+    return _check("versions", OK, "; ".join(parts))
+
+
 def check_config(explicit: str | None) -> tuple[list[dict[str, str]], Settings | None]:
     path = config_path(explicit)
     try:
@@ -143,9 +158,32 @@ def check_database(settings: Settings) -> dict[str, str]:
         return _check(
             "database",
             WARN,
-            f"ladybug database not created yet at {path}; run kg-ladybug-setup",
+            f"ladybug database not created yet at {path}; "
+            f"run kg-ladybug-setup --database {path} --apply",
         )
-    return _check("database", OK, f"ladybug database present at {path}")
+    from kg_mcp.ladybug import inspect_database
+
+    try:
+        report = inspect_database(str(path))
+    except Exception as exc:
+        return _check("database", FAIL, f"ladybug database at {path} did not open: {exc}")
+    if report["missing_extensions"]:
+        return _check(
+            "database",
+            FAIL,
+            f"ladybug extension(s) not installed: {', '.join(report['missing_extensions'])}; "
+            f"run kg-ladybug-setup --database {path} --apply",
+        )
+    if report["missing_indexes"]:
+        # Without these every search fails with a Binder exception; the setup command
+        # creates them on an existing database without touching its data.
+        return _check(
+            "database",
+            FAIL,
+            f"ladybug full-text index(es) missing: {', '.join(report['missing_indexes'])}; "
+            f"run kg-ladybug-setup --database {path} --apply",
+        )
+    return _check("database", OK, f"ladybug database present at {path}; full-text indexes present")
 
 
 def check_reranker(settings: Settings) -> dict[str, str]:
@@ -174,11 +212,27 @@ def check_transport(settings: Settings) -> dict[str, str]:
     if server.host not in {"127.0.0.1", "::1", "localhost"} and not server.auth.token:
         return _check("transport", FAIL, f"streamable-http on {server.host} without a token")
     scope = ", ".join(server.auth.groups) if server.auth.groups else "all configured groups"
+    hosts = (
+        f"; Host allow-list: {', '.join(server.allowed_hosts)}"
+        if server.allowed_hosts
+        else "; Host allow-list: SDK default (loopback names only on a loopback host)"
+    )
     return _check(
         "transport",
         OK,
-        f"streamable-http on {server.host}:{server.port}; token grants {scope}",
+        f"streamable-http on {server.host}:{server.port}; token grants {scope}{hosts}",
     )
+
+
+def check_embedder_fingerprint(settings: Settings) -> dict[str, str]:
+    """The embedder that wrote the graph must be the one that queries it."""
+    from kg_mcp import fingerprint
+
+    try:
+        status, detail = fingerprint.check(settings)
+    except Exception as exc:
+        return _check("embedder-record", WARN, f"not determined: {exc}")
+    return _check("embedder-record", status, detail)
 
 
 def check_embedding_dim_binding(settings: Settings) -> dict[str, str]:
@@ -216,7 +270,9 @@ def check_embedding_model_known(settings: Settings) -> dict[str, str]:
 
 
 def run_checks(explicit: str | None = None, *, offline: bool = False) -> list[dict[str, str]]:
-    results, settings = check_config(explicit)
+    results = [check_versions()]
+    config_results, settings = check_config(explicit)
+    results.extend(config_results)
     if settings is None:
         return results
     results.append(check_workspace(settings))
@@ -224,6 +280,7 @@ def run_checks(explicit: str | None = None, *, offline: bool = False) -> list[di
     results.append(check_reranker(settings))
     results.append(check_embedding_model_known(settings))
     results.append(check_embedding_dim_binding(settings))
+    results.append(check_embedder_fingerprint(settings))
     if offline:
         results.append(_check("database", WARN, "skipped (--offline)"))
         results.append(_check("llm", WARN, "skipped (--offline)"))

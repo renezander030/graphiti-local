@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.3.0
+
+0.2.x could run unattended, but not on the fully local profile: on Ladybug every search
+failed, and a running server locked every other command out of the file. This release
+makes the embedded backend hold up under the same rules as the server backends, and it
+closes the loop that `kg export` opened.
+
+### Breaking
+
+- **graphiti-core is pinned to 0.30.1** (was 0.29.3). Upstream fixes that reach every
+  user: node attributes are no longer cleared when no entity type applies, the edge
+  reranker shortlist is merged correctly, and Neo4j queries go to the configured
+  database. Neo4j Enterprise users with a renamed home database: read the upstream
+  0.30.0 notes, queries now target `neo4j` unless `database` is set.
+- **Readers open Ladybug read-only and require a prepared database.** `graphiti-local`,
+  `kg ask`, `kg export`, `kg verify` and the other read commands no longer take the
+  write lock, so an ingest or a drain runs while the server is up. They refuse to open a
+  file without the full-text indexes and name the fix. Existing databases: run
+  `kg-ladybug-setup --database PATH --apply` once; it creates the missing indexes and
+  does not touch the data.
+- **A write refuses an embedder change.** The first ingest or restore records the
+  embedder for its database in `workspace/embedders.json`. A later `kg-ingest`,
+  `kg-workspace drain` or restore with a different `embedder.model` or width exits `2`
+  instead of mixing two vector spaces in one graph. To move to a new embedder:
+  `kg export`, an empty database, `kg-ingest SNAPSHOT --restore --apply`.
+- **`kg` exits `3` when a graph call exceeds `graph.query_timeout_seconds`** (default
+  30). The MCP tools return an error object for the same case.
+
+### Added
+
+- `kg-ingest SNAPSHOT --restore [--group G] [--apply]` replays a `kg export` snapshot
+  into the configured backend: entity names and facts are re-embedded under the
+  configured embedder, nodes are saved before the edges that reference them, and records
+  keep their UUIDs, so a second restore updates rather than duplicates. An edge whose
+  endpoint is not in the graph is reported as failed, not silently skipped. `--group`
+  remaps every record, which is how a Ladybug snapshot lands on FalkorDB or Neo4j.
+- `kg duplicates [group ...]` lists entities whose names collide once casing, whitespace
+  and punctuation are ignored, with UUIDs and summaries. Read-only; a merge is a
+  proposal like any other correction.
+- `graph.query_timeout_seconds` bounds every graph call in the CLI, the six MCP tools and
+  `kg verify`. A backend that hangs produces an error an agent can read instead of a
+  tool call that never returns.
+- The MCP server reopens its read-only Ladybug handle when the file changes, so facts
+  landed by a drain are served without a restart.
+- `server.allowed_hosts` for `streamable-http` behind a reverse proxy: the Host names the
+  MCP SDK's DNS-rebinding check accepts. Without it the SDK default applies, which is
+  loopback names only on a loopback host and no check elsewhere.
+- `kg --version`, and `-H`/`--human` is accepted after the subcommand as well as before
+  it (`kg verify --offline -H`).
+- `kg doctor` reports the installed versions, the recorded embedder for the configured
+  database, and whether a Ladybug file has its extensions and full-text indexes.
+- `kg-ladybug-setup --apply` creates the schema and the four full-text indexes as well as
+  installing the extensions, so a fresh database answers `kg ask` before anything is
+  ingested.
+
+### Fixed
+
+- Every search on a Ladybug graph raised `Binder exception: Table RelatesToNode_ doesn't
+  have an index with name edge_name_and_fact` (#1). graphiti-core's Kuzu driver declares
+  its full-text indexes but its index builder is a no-op, so they were never created;
+  the edgeless graph in the report was a symptom. Read-write opens and the setup command
+  create them now, and an empty graph returns no facts.
+- `kg-workspace drain` and `kg-ingest` report a refused write or a backend that did not
+  open as an error with an exit code instead of a traceback.
+- `__version__` reported 0.1.0 whatever the release; it comes from the package metadata.
+
 ## 0.2.2
 
 - `kg-ingest` handles `SIGTERM` and `SIGINT`: it finishes the record in flight, closes

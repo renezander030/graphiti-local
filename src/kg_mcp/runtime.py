@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from typing import Any
 
 from kg_mcp.config import Settings
 
 
 def _is_official_openai(url: str) -> bool:
     return url.rstrip("/") in {"https://api.openai.com", "https://api.openai.com/v1"}
+
+
+async def bounded(awaitable: Any, seconds: float, what: str) -> Any:
+    """Bound one graph call so a hung backend fails loudly instead of blocking forever."""
+    try:
+        return await asyncio.wait_for(awaitable, timeout=seconds)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(
+            f"{what} timed out after {seconds:g}s; the backend did not answer"
+        ) from exc
 
 
 def build_reranker(settings: Settings):
@@ -106,7 +118,8 @@ def build_graphiti(settings: Settings, *, read_only: bool):
     if provider == "ladybug":
         from kg_mcp.ladybug import build_ladybug_driver
 
-        driver = build_ladybug_driver(settings.database.ladybug.path)
+        # Readers open the file read-only so they coexist with the one writer Ladybug allows.
+        driver = build_ladybug_driver(settings.database.ladybug.path, read_only=read_only)
         return Graphiti(graph_driver=driver, **kwargs)
     if provider == "neo4j":
         database = settings.database.neo4j

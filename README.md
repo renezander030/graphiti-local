@@ -37,7 +37,9 @@ kg pending [group]
 kg propose GROUP "fact" --type source-fact --provenance "source"
 kg doctor [--offline]
 kg export [group ...] [--output PATH]
+kg duplicates [group ...]
 kg verify [--offline]
+kg --version
 ```
 
 `propose` appends to a local JSONL queue. It does not modify the graph. A human
@@ -48,7 +50,8 @@ adds `--apply` only when the proposal is ready.
 
 Every command prints JSON on stdout and exits non-zero when it refuses, so a cron
 job or an agent can consume a result without scraping text or guessing whether a
-call succeeded. Add `-H`/`--human` for the reader-friendly form.
+call succeeded. Add `-H`/`--human` for the reader-friendly form, before or after the
+subcommand.
 
 ```bash
 kg ask "what changed last week" | jq -r '.facts[].fact'
@@ -56,16 +59,26 @@ kg ask "what changed last week" | jq -r '.facts[].fact'
 kg propose unconfigured-group "a fact"; echo $?   # 2 — refused, nothing queued
 ```
 
+Every graph call is bounded by `graph.query_timeout_seconds` (default 30). A backend
+that hangs makes `kg` exit `3` with the reason, and an MCP tool return an error object,
+instead of an agent waiting on a call that never returns.
+
 Before a run depends on the configuration, prove it:
 
 ```bash
-kg doctor          # config, workspace, backend, LLM, and a live embedding-width probe
+kg doctor          # versions, config, workspace, backend, LLM, and a live embedding-width probe
 kg verify          # the six read tools, no write tools, and live retrieval
 ```
 
 `kg doctor` probes the embedder endpoint and fails when the vector width it returns
 disagrees with `embedder.dimensions`. That mismatch is otherwise silent, and it
-corrupts every embedding it writes.
+corrupts every embedding it writes. It also compares the configured embedder with the
+one recorded by the first write to this database: a model change at the same width is
+just as silent, and a later ingest or restore refuses it with exit code `2`.
+
+On the embedded Ladybug backend the readers (`graphiti-local`, `kg ask`, `kg export`,
+`kg verify`) open the file read-only, so an ingest or a drain runs while the server is
+up, and the server picks up what landed without a restart.
 
 ## Quick start
 
@@ -107,7 +120,11 @@ uv run kg-ladybug-setup --database ./workspace/example.ladybug
 # Review the dry run, then repeat with --apply in a network-enabled environment.
 ```
 
-Opening a Ladybug graph never installs extensions automatically.
+With `--apply` the command installs the search extensions, creates the schema and the
+four full-text indexes hybrid search queries. A database prepared this way answers
+`kg ask` before anything is ingested. Opening a Ladybug graph never installs extensions
+automatically, and a reader refuses a file without the indexes and names this command.
+A database created by 0.2.x has no indexes: run the command once more on it.
 
 ## Running without a cloud provider
 
@@ -164,6 +181,26 @@ readable whichever backend produced it. Embeddings are omitted deliberately: the
 derived from the text, and a vector restored under a different embedding model would
 be silently wrong.
 
+```bash
+kg-ingest ./snapshot.jsonl --restore                    # dry run: what would land where
+kg-ingest ./snapshot.jsonl --restore --apply            # replay into the configured backend
+kg-ingest ./snapshot.jsonl --restore --group team-a --apply   # remap every record to one group
+```
+
+A restore re-embeds every entity name and fact under the configured embedder and saves
+nodes before the edges that reference them. Records keep their UUIDs, so restoring the
+same snapshot twice updates rather than duplicates. This is also the path from one
+backend to another, and the path to a new embedder: export, point the configuration at
+an empty database, restore.
+
+```bash
+kg duplicates            # entities whose names collide once casing and punctuation are ignored
+```
+
+Graphiti resolves duplicates by embedding similarity, so `ACME Corp` and `acme corp.`
+can end up as two entities. The report shows what split; a merge is a proposal like any
+other correction.
+
 ## Safety model
 
 - Graphiti telemetry is disabled before its package is imported.
@@ -171,6 +208,9 @@ be silently wrong.
 - The `streamable-http` transport refuses to start without `server.auth.token`,
   and every request over it must carry that bearer token. stdio is a private pipe;
   a network port is reachable by anything that can open it.
+- Behind a reverse proxy, `server.allowed_hosts` lists the Host names the MCP SDK's
+  DNS-rebinding check accepts (`["kg.example.internal:*"]`). Without it the SDK default
+  applies: loopback names only on a loopback host, no check elsewhere.
 - Configured graph groups form an access allow-list, enforced on reads *and* on
   `kg propose`. A fact addressed to an unconfigured group is refused, not queued.
 - Credentials remain environment variables.

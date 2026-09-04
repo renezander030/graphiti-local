@@ -37,6 +37,8 @@ def read_records(path: Path, *, skip_invalid: bool = False) -> list[dict[str, An
             if skip_invalid:
                 continue
             raise SystemExit(f"{path}:{line_number}: each line must be an object")
+        if line_number == 1 and record.get("kind") == "export":
+            raise SystemExit(f"{path}: this is a kg export snapshot; pass --restore to replay it")
         missing = [name for name in ("name", "body") if not str(record.get(name, "")).strip()]
         if missing:
             if skip_invalid:
@@ -175,7 +177,14 @@ async def ingest_records(
 
     from graphiti_core.nodes import EpisodeType
 
+    from kg_mcp import fingerprint
     from kg_mcp.runtime import build_graphiti
+
+    # Vectors from two embedders in one graph rank wrongly and say nothing; refuse before
+    # the first write rather than after.
+    drift = fingerprint.drift(settings)
+    if drift:
+        raise ValueError(drift)
 
     graph = build_graphiti(settings, read_only=False)
     ingested, failures, interrupted = 0, [], False
@@ -205,6 +214,8 @@ async def ingest_records(
                 if ledger:
                     _record_completed(key, domain, str(record["name"]).strip())
                 ingested += 1
+        if ingested:
+            fingerprint.record(settings)
     finally:
         # Always close: an embedded backend left with a partial write may refuse to reopen.
         await graph.close()
@@ -236,8 +247,21 @@ def main() -> None:
         help="stop at the first failing record instead of isolating it",
     )
     parser.add_argument("--skip-invalid", action="store_true", help="ignore malformed input lines")
+    parser.add_argument(
+        "--restore",
+        action="store_true",
+        help="the input is a kg export snapshot; replay it instead of ingesting episodes",
+    )
+    parser.add_argument(
+        "--group",
+        default=None,
+        help="with --restore: the group every restored record is written to",
+    )
     args = parser.parse_args()
     as_json = not args.human
+    if args.restore:
+        _restore_main(args, as_json=as_json)
+        return
     try:
         records = read_records(args.input, skip_invalid=args.skip_invalid)
         result = asyncio.run(
@@ -250,6 +274,9 @@ def main() -> None:
         )
     except ValueError as exc:
         fail(str(exc), code=2, as_json=as_json)
+        return
+    except (FileNotFoundError, RuntimeError) as exc:
+        fail(str(exc), as_json=as_json)
         return
     result["total"] = len(records)
 
@@ -270,6 +297,30 @@ def main() -> None:
         return lines
 
     emit(result, human=human, as_json=as_json)
+    if result["failed"]:
+        raise SystemExit(1)
+
+
+def _restore_main(args: argparse.Namespace, *, as_json: bool) -> None:
+    from kg_mcp.output import emit, fail
+    from kg_mcp.restore import human_lines, restore_snapshot
+
+    try:
+        result = asyncio.run(
+            restore_snapshot(
+                args.input,
+                apply=args.apply,
+                group=args.group,
+                fail_fast=args.fail_fast,
+            )
+        )
+    except ValueError as exc:
+        fail(str(exc), code=2, as_json=as_json)
+        return
+    except (FileNotFoundError, RuntimeError) as exc:
+        fail(str(exc), as_json=as_json)
+        return
+    emit(result, human=lambda: human_lines(result), as_json=as_json)
     if result["failed"]:
         raise SystemExit(1)
 

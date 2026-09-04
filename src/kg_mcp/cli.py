@@ -12,10 +12,12 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from kg_mcp import __version__
 from kg_mcp.config import allowed_groups, load_config
-from kg_mcp.output import EXIT_REJECTED, CommandError, emit, fail
+from kg_mcp.output import EXIT_REJECTED, EXIT_TIMEOUT, CommandError, emit, fail
+from kg_mcp.runtime import bounded
 
-READ_COMMANDS = {"ask", "nodes", "episodes", "edge", "status", "export"}
+READ_COMMANDS = {"ask", "nodes", "episodes", "edge", "status", "export", "duplicates"}
 
 
 def _pending_items(groups: list[str] | None) -> list[dict[str, Any]]:
@@ -84,11 +86,16 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
     settings = load_config()
     from kg_mcp.runtime import build_graphiti
 
+    timeout = settings.graph.query_timeout_seconds
     graph = build_graphiti(settings, read_only=True)
     try:
         if args.command == "ask":
             groups = allowed_groups(args.groups, settings)
-            results = await graph.search(args.query, group_ids=groups, num_results=args.limit)
+            results = await bounded(
+                graph.search(args.query, group_ids=groups, num_results=args.limit),
+                timeout,
+                "ask",
+            )
             return {
                 "query": args.query,
                 "groups": groups or settings.graph.groups,
@@ -108,10 +115,10 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
             groups = allowed_groups(args.groups, settings)
             from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 
-            result = await graph.search_(
-                args.query,
-                config=NODE_HYBRID_SEARCH_RRF,
-                group_ids=groups,
+            result = await bounded(
+                graph.search_(args.query, config=NODE_HYBRID_SEARCH_RRF, group_ids=groups),
+                timeout,
+                "nodes",
             )
             return {
                 "query": args.query,
@@ -122,10 +129,14 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
             }
         if args.command == "episodes":
             groups = allowed_groups(args.groups, settings)
-            episodes = await graph.retrieve_episodes(
-                reference_time=datetime.now(timezone.utc),
-                last_n=args.limit,
-                group_ids=groups,
+            episodes = await bounded(
+                graph.retrieve_episodes(
+                    reference_time=datetime.now(timezone.utc),
+                    last_n=args.limit,
+                    group_ids=groups,
+                ),
+                timeout,
+                "episodes",
             )
             return {
                 "episodes": [
@@ -148,8 +159,10 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
                 drivers = [graph.driver.clone(database=group) for group in settings.graph.groups]
             for driver in drivers:
                 try:
-                    edge = await EntityEdge.get_by_uuid(driver, args.uuid)
+                    edge = await bounded(EntityEdge.get_by_uuid(driver, args.uuid), timeout, "edge")
                     break
+                except TimeoutError:
+                    raise
                 except Exception:
                     continue
             if edge is None:
@@ -170,7 +183,11 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
                     if provider == "falkordb"
                     else graph.driver
                 )
-                rows, _, _ = await driver.execute_query("MATCH (n) RETURN count(n) AS count")
+                rows, _, _ = await bounded(
+                    driver.execute_query("MATCH (n) RETURN count(n) AS count"),
+                    timeout,
+                    "status",
+                )
                 groups.append({"group": group, "nodes": rows[0]["count"]})
                 if provider != "falkordb":
                     break
@@ -179,7 +196,18 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
             from kg_mcp.export import export_graph
 
             groups = allowed_groups(args.groups, settings) or settings.graph.groups
-            return await export_graph(graph, settings, groups, output=args.output)
+            return await bounded(
+                export_graph(graph, settings, groups, output=args.output), timeout, "export"
+            )
+        if args.command == "duplicates":
+            from kg_mcp.duplicates import find_duplicates
+
+            groups = allowed_groups(args.groups, settings) or settings.graph.groups
+            return await bounded(
+                find_duplicates(graph, settings, groups, limit=args.limit),
+                timeout,
+                "duplicates",
+            )
         raise CommandError(f"unknown command: {args.command}")
     finally:
         await graph.close()
@@ -227,6 +255,19 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
             f"exported {payload['nodes']} node(s) and {payload['edges']} edge(s) "
             f"from {', '.join(payload['groups'])} to {payload['output']}"
         ]
+    if command == "duplicates":
+        lines = []
+        for item in payload["clusters"]:
+            lines.append(f"{item['count']}x {item['name']}")
+            lines.extend(
+                f"   {member['uuid']}  {member['name']} [{member['group_id']}]"
+                for member in item["members"]
+            )
+        lines.append(
+            f"({payload['duplicates']} entities in {len(payload['clusters'])} cluster(s) "
+            f"out of {payload['entities']})"
+        )
+        return lines
     return [str(payload)]
 
 
@@ -244,29 +285,54 @@ async def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     return await _graph_command(args)
 
 
+def _core_version() -> str:
+    from importlib import metadata
+
+    try:
+        return metadata.version("graphiti-core")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def parser() -> argparse.ArgumentParser:
+    # The reader flag is accepted before and after the subcommand. The subcommand copy
+    # suppresses its default so it cannot overwrite a value given up front.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "-H",
+        "--human",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print the reader-friendly form instead of JSON",
+    )
     root = argparse.ArgumentParser(prog="kg", description=__doc__)
     root.add_argument(
         "-H",
         "--human",
         action="store_true",
+        default=False,
         help="print the reader-friendly form instead of JSON",
+    )
+    root.add_argument(
+        "--version",
+        action="version",
+        version=f"kg {__version__} (graphiti-core {_core_version()})",
     )
     commands = root.add_subparsers(dest="command", required=True)
     for name in ("ask", "nodes"):
-        command = commands.add_parser(name)
+        command = commands.add_parser(name, parents=[common])
         command.add_argument("query")
         command.add_argument("groups", nargs="*")
         command.add_argument("--limit", type=int, default=10)
-    episodes = commands.add_parser("episodes")
+    episodes = commands.add_parser("episodes", parents=[common])
     episodes.add_argument("groups", nargs="*")
     episodes.add_argument("--limit", type=int, default=10)
-    edge = commands.add_parser("edge")
+    edge = commands.add_parser("edge", parents=[common])
     edge.add_argument("uuid")
-    commands.add_parser("status")
-    pending = commands.add_parser("pending")
+    commands.add_parser("status", parents=[common])
+    pending = commands.add_parser("pending", parents=[common])
     pending.add_argument("group", nargs="?")
-    propose = commands.add_parser("propose")
+    propose = commands.add_parser("propose", parents=[common])
     propose.add_argument("group")
     propose.add_argument("fact")
     propose.add_argument(
@@ -282,20 +348,27 @@ def parser() -> argparse.ArgumentParser:
         default="assert",
     )
     propose.add_argument("--supersedes", default="")
-    doctor = commands.add_parser("doctor")
+    doctor = commands.add_parser("doctor", parents=[common])
     doctor.add_argument(
         "--offline",
         action="store_true",
         help="skip checks that need the network",
     )
-    export = commands.add_parser("export")
+    export = commands.add_parser("export", parents=[common])
     export.add_argument("groups", nargs="*")
     export.add_argument(
         "--output",
         default=None,
         help="destination JSONL path (default: a timestamped file in the workspace)",
     )
-    verify = commands.add_parser("verify")
+    duplicates = commands.add_parser(
+        "duplicates",
+        parents=[common],
+        help="entities that share a name once casing and punctuation are ignored",
+    )
+    duplicates.add_argument("groups", nargs="*")
+    duplicates.add_argument("--limit", type=int, default=50, help="clusters to report")
+    verify = commands.add_parser("verify", parents=[common])
     verify.add_argument("--offline", action="store_true")
     verify.add_argument("--query", default="graphiti local verification probe")
     return root
@@ -303,7 +376,7 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
-    as_json = not args.human
+    as_json = not getattr(args, "human", False)
     try:
         payload = asyncio.run(_dispatch(args))
     except CommandError as exc:
@@ -311,6 +384,9 @@ def main() -> None:
         return
     except ValueError as exc:
         fail(str(exc), code=EXIT_REJECTED, as_json=as_json)
+        return
+    except TimeoutError as exc:
+        fail(str(exc), code=EXIT_TIMEOUT, as_json=as_json)
         return
     except (FileNotFoundError, RuntimeError) as exc:
         fail(str(exc), as_json=as_json)

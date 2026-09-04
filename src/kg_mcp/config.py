@@ -59,6 +59,10 @@ class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    # Host headers the network transport answers, e.g. ["kg.example.internal:*"]. Behind a
+    # reverse proxy the MCP SDK's DNS-rebinding check rejects every request with 421
+    # unless the proxied hostname is listed here. Ignored by stdio.
+    allowed_hosts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_network_exposure(self) -> ServerConfig:
@@ -77,6 +81,9 @@ class ServerConfig(BaseModel):
 class GraphConfig(BaseModel):
     groups: list[str] = Field(default_factory=lambda: ["main"], min_length=1)
     workspace_dir: str = "./workspace"
+    # Upper bound on one graph call. A backend that hangs must fail loudly rather than
+    # leave an agent waiting on a tool call it reads as "no context".
+    query_timeout_seconds: float = Field(default=30.0, gt=0)
 
     @model_validator(mode="after")
     def validate_groups(self) -> GraphConfig:

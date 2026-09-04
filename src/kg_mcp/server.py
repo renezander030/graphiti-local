@@ -14,6 +14,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from kg_mcp.config import Settings, allowed_groups, load_config
+from kg_mcp.runtime import bounded
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,25 @@ def _date_range(after: str | None, before: str | None):
     return [conditions] if conditions else None
 
 
+def transport_security(settings: Settings | None):
+    """Host allow-list for the network transport.
+
+    Without ``server.allowed_hosts`` the SDK default applies: on a loopback host only
+    loopback Host headers pass, elsewhere the check is off. Behind a reverse proxy the
+    Host header carries the proxied name, so it has to be listed to avoid a 421.
+    """
+    if settings is None or not settings.server.allowed_hosts:
+        return None
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    hosts = list(settings.server.allowed_hosts)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=[f"{scheme}://{host}" for host in hosts for scheme in ("http", "https")],
+    )
+
+
 def create_server(settings: Settings | None = None) -> FastMCP:
     state: dict[str, Any] = {}
 
@@ -109,12 +129,19 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         host=selected.server.host if selected else "127.0.0.1",
         port=selected.server.port if selected else 8000,
         lifespan=lifespan,
+        transport_security=transport_security(selected),
     )
 
-    def runtime() -> tuple[Any, Settings]:
+    def runtime() -> tuple[Any, Settings, float]:
         if "graph" not in state:
             raise RuntimeError("Graphiti Local runtime is not initialized")
-        return state["graph"], state["settings"]
+        graph, active = state["graph"], state["settings"]
+        # An embedded read-only handle sees the file as it was at open time; a drain that
+        # landed since must become visible without restarting the server.
+        reopen = getattr(graph.driver, "reopen_if_changed", None)
+        if reopen is not None:
+            reopen()
+        return graph, active, active.graph.query_timeout_seconds
 
     @mcp.tool()
     async def search_nodes(
@@ -128,7 +155,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if max_nodes < 1:
             return {"error": "max_nodes must be a positive integer"}
         try:
-            graph, active = runtime()
+            graph, active, timeout = runtime()
             groups = allowed_groups(group_ids, active)
             from graphiti_core.search.search_config_recipes import (
                 NODE_HYBRID_SEARCH_NODE_DISTANCE,
@@ -141,12 +168,16 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                 if center_node_uuid
                 else NODE_HYBRID_SEARCH_RRF
             )
-            result = await graph.search_(
-                query=query,
-                config=recipe,
-                group_ids=groups,
-                center_node_uuid=center_node_uuid,
-                search_filter=SearchFilters(node_labels=entity_types),
+            result = await bounded(
+                graph.search_(
+                    query=query,
+                    config=recipe,
+                    group_ids=groups,
+                    center_node_uuid=center_node_uuid,
+                    search_filter=SearchFilters(node_labels=entity_types),
+                ),
+                timeout,
+                "search_nodes",
             )
             nodes = [_node(node) for node in (result.nodes or [])[:max_nodes]]
             return {
@@ -173,7 +204,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if max_facts < 1:
             return {"error": "max_facts must be a positive integer"}
         try:
-            graph, active = runtime()
+            graph, active, timeout = runtime()
             groups = allowed_groups(group_ids, active)
             from graphiti_core.search.search_filters import SearchFilters
 
@@ -182,12 +213,16 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                 valid_at=_date_range(valid_at_after, valid_at_before),
                 invalid_at=_date_range(invalid_at_after, invalid_at_before),
             )
-            edges = await graph.search(
-                query=query,
-                group_ids=groups,
-                num_results=max_facts,
-                center_node_uuid=center_node_uuid,
-                search_filter=search_filter,
+            edges = await bounded(
+                graph.search(
+                    query=query,
+                    group_ids=groups,
+                    num_results=max_facts,
+                    center_node_uuid=center_node_uuid,
+                    search_filter=search_filter,
+                ),
+                timeout,
+                "search_memory_facts",
             )
             facts = [_edge(edge) for edge in edges]
             return {
@@ -202,18 +237,26 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     async def get_entity_edge(uuid: str) -> dict[str, Any]:
         """Get one fact edge by UUID from an allow-listed graph."""
         try:
-            graph, active = runtime()
+            graph, active, timeout = runtime()
             from graphiti_core.edges import EntityEdge
 
             if active.database.provider == "falkordb":
                 for group in active.graph.groups:
                     try:
                         driver = graph.driver.clone(database=group)
-                        return _edge(await EntityEdge.get_by_uuid(driver, uuid))
+                        edge = await bounded(
+                            EntityEdge.get_by_uuid(driver, uuid), timeout, "get_entity_edge"
+                        )
+                        return _edge(edge)
+                    except TimeoutError:
+                        raise
                     except Exception:
                         continue
                 raise LookupError(f"edge not found: {uuid}")
-            return _edge(await EntityEdge.get_by_uuid(graph.driver, uuid))
+            edge = await bounded(
+                EntityEdge.get_by_uuid(graph.driver, uuid), timeout, "get_entity_edge"
+            )
+            return _edge(edge)
         except Exception as exc:
             logger.exception("edge lookup failed")
             return {"error": f"Error getting entity edge: {exc}"}
@@ -227,12 +270,16 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if max_episodes < 1:
             return {"error": "max_episodes must be a positive integer"}
         try:
-            graph, active = runtime()
+            graph, active, timeout = runtime()
             groups = allowed_groups(group_ids, active)
-            episodes = await graph.retrieve_episodes(
-                reference_time=datetime.now(timezone.utc),
-                last_n=max_episodes,
-                group_ids=groups,
+            episodes = await bounded(
+                graph.retrieve_episodes(
+                    reference_time=datetime.now(timezone.utc),
+                    last_n=max_episodes,
+                    group_ids=groups,
+                ),
+                timeout,
+                "get_episodes",
             )
             results = [
                 {
@@ -264,7 +311,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if not episode_uuids:
             return {"error": "episode_uuids must contain at least one UUID"}
         try:
-            graph, active = runtime()
+            graph, active, timeout = runtime()
             groups = allowed_groups(group_id, active)
             driver = graph.driver
             if active.database.provider == "falkordb":
@@ -273,13 +320,16 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             from graphiti_core.nodes import EpisodicNode
             from graphiti_core.search.search_utils import get_mentioned_nodes
 
-            episodes = await EpisodicNode.get_by_uuids(driver, episode_uuids)
-            edges = [
-                edge
-                for episode in episodes
-                for edge in await EntityEdge.get_by_uuids(driver, episode.entity_edges)
-            ]
-            nodes = await get_mentioned_nodes(driver, episodes)
+            async def trace() -> tuple[list[Any], list[Any]]:
+                episodes = await EpisodicNode.get_by_uuids(driver, episode_uuids)
+                edges = [
+                    edge
+                    for episode in episodes
+                    for edge in await EntityEdge.get_by_uuids(driver, episode.entity_edges)
+                ]
+                return await get_mentioned_nodes(driver, episodes), edges
+
+            nodes, edges = await bounded(trace(), timeout, "get_episode_entities")
             return {
                 "message": f"Retrieved provenance for {len(episode_uuids)} episode(s)",
                 "nodes": [_node(node) for node in nodes],
@@ -293,8 +343,12 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     async def get_status() -> dict[str, str]:
         """Check the server and its configured database connection."""
         try:
-            graph, active = runtime()
-            await graph.driver.execute_query("MATCH (n) RETURN count(n) AS count")
+            graph, active, timeout = runtime()
+            await bounded(
+                graph.driver.execute_query("MATCH (n) RETURN count(n) AS count"),
+                timeout,
+                "get_status",
+            )
             return {
                 "status": "ok",
                 "message": f"Graphiti Local is connected to {active.database.provider}",

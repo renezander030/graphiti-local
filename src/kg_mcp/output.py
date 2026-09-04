@@ -15,6 +15,7 @@ from typing import Any
 
 EXIT_ERROR = 1
 EXIT_REJECTED = 2
+EXIT_TIMEOUT = 3
 
 
 class CommandError(Exception):
