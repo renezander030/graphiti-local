@@ -65,6 +65,10 @@ closes the loop that `kg export` opened.
 - `kg-workspace drain` and `kg-ingest` report a refused write or a backend that did not
   open as an error with an exit code instead of a traceback.
 - `__version__` reported 0.1.0 whatever the release; it comes from the package metadata.
+- The release audit flagged GitHub's own noreply committer identity on the merge commit
+  a pull request run checks out, so every pull request failed CI while the same commit
+  passed on push. GitHub's noreply identities are treated as share-safe; the check now
+  covers committer identities as well as authors.
 
 ## 0.2.2
 

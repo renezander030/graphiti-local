@@ -20,6 +20,11 @@ TEXT_SUFFIXES = {
     ".txt",
     ".example",
 }
+# GitHub signs the merge commit a pull_request run checks out with its own identity, and
+# users can publish under a noreply address; neither is a person's mailbox.
+SAFE_IDENTITY = re.compile(
+    r"<(?:[^<>\s]+@users\.noreply\.github\.com|noreply@github\.com)>$", re.I
+)
 PATTERNS = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     "GitHub token": re.compile(r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b"),
@@ -55,15 +60,26 @@ def audit(root: Path, *, allow_remote: bool = False) -> list[str]:
         if remote and not allow_remote:
             findings.append("git metadata: remote configured")
         identities = subprocess.run(
-            ["git", "log", "--format=%an <%ae>"],
+            ["git", "log", "--format=%an <%ae>%n%cn <%ce>"],
             cwd=root,
             check=True,
             capture_output=True,
             text=True,
         ).stdout
-        if any(pattern.search(identities) for pattern in PATTERNS.values()):
+        if sensitive_identities(identities):
             findings.append("git metadata: sensitive author identity")
     return findings
+
+
+def sensitive_identities(log: str) -> list[str]:
+    """Author or committer lines that look like a real person's address."""
+    return [
+        line
+        for line in log.splitlines()
+        if line.strip()
+        and not SAFE_IDENTITY.search(line.strip())
+        and any(pattern.search(line) for pattern in PATTERNS.values())
+    ]
 
 
 def main() -> None:
