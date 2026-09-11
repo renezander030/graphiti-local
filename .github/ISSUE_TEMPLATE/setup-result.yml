@@ -1,0 +1,39 @@
+name: Local setup result
+description: Share a successful setup or the step where you got stuck.
+title: "Setup result: "
+labels: []
+body:
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Reached a synthetic query result
+        - Reached a synthetic MCP query result
+        - Blocked during setup
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, memory, Python and Ollama versions. No device identifiers.
+    validations:
+      required: true
+  - type: input
+    id: models
+    attributes:
+      label: Models and repository version
+      placeholder: qwen2.5:7b; nomic-embed-text; v0.3.0
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Synthetic result or failing step
+      description: Paste the relevant command and synthetic output. Remove credentials, home paths, and private graph data.
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Where did you find the project?
+      description: Optional; for example GitHub, a gist, or an MCP directory.

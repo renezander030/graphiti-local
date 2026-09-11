@@ -1,0 +1,122 @@
+[
+  {
+    "label": "setup",
+    "command": "uv run --frozen kg-ladybug-setup --database $CHECKOUT/workspace/local-demo-4/graph.ladybug --apply",
+    "seconds": 1.47,
+    "exit_code": 0,
+    "stdout": "FTS: installed and loaded\nVECTOR: installed and loaded\nschema: ready\nfull-text indexes created: episode_content, node_name_and_summary, community_name, edge_name_and_fact\n",
+    "stderr": ""
+  },
+  {
+    "label": "doctor",
+    "command": "uv run --frozen kg doctor",
+    "seconds": 0.567,
+    "exit_code": 0,
+    "stdout": "{\n  \"status\": \"warn\",\n  \"checks\": [\n    {\n      \"check\": \"versions\",\n      \"status\": \"ok\",\n      \"detail\": \"graphiti-local 0.3.0; graphiti-core 0.30.1; ladybug 0.19.1; mcp 1.29.1; python 3.10.20\"\n    },\n    {\n      \"check\": \"config\",\n      \"status\": \"ok\",\n      \"detail\": \"$CHECKOUT/config/ollama.example.yaml parsed; groups: example\"\n    },\n    {\n      \"check\": \"workspace\",\n      \"status\": \"ok\",\n      \"detail\": \"$CHECKOUT/workspace/local-demo-4 is writable\"\n    },\n    {\n      \"check\": \"transport\",\n      \"status\": \"ok\",\n      \"detail\": \"stdio (no network exposure)\"\n    },\n    {\n      \"check\": \"reranker\",\n      \"status\": \"ok\",\n      \"detail\": \"passthrough (no extra model call)\"\n    },\n    {\n      \"check\": \"embedder-model\",\n      \"status\": \"ok\",\n      \"detail\": \"nomic-embed-text is a known model\"\n    },\n    {\n      \"check\": \"embedding-dim-binding\",\n      \"status\": \"ok\",\n      \"detail\": \"graphiti uses 768 dimensions\"\n    },\n    {\n      \"check\": \"embedder-record\",\n      \"status\": \"warn\",\n      \"detail\": \"no embedder recorded yet; the first ingest or restore records it\"\n    },\n    {\n      \"check\": \"database\",\n      \"status\": \"ok\",\n      \"detail\": \"ladybug database present at $CHECKOUT/workspace/local-demo-4/graph.ladybug; full-text indexes present\"\n    },\n    {\n      \"check\": \"llm\",\n      \"status\": \"ok\",\n      \"detail\": \"qwen2.5:7b via http://127.0.0.1:11434/v1 (HTTP 200)\"\n    },\n    {\n      \"check\": \"embedder\",\n      \"status\": \"ok\",\n      \"detail\": \"nomic-embed-text returns 768 dimensions\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "empty_query",
+    "command": "uv run --frozen kg ask Which database does Aurora Analytics use for local reports? example",
+    "seconds": 0.82,
+    "exit_code": 0,
+    "stdout": "{\n  \"query\": \"Which database does Aurora Analytics use for local reports?\",\n  \"groups\": [\n    \"example\"\n  ],\n  \"facts\": [],\n  \"pending\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "ingest_preview",
+    "command": "uv run --frozen kg-ingest examples/local_memory_demo.jsonl",
+    "seconds": 0.103,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": false,\n  \"planned\": [\n    {\n      \"domain\": \"example\",\n      \"name\": \"Reporting database\"\n    },\n    {\n      \"domain\": \"example\",\n      \"name\": \"Documentation storage\"\n    }\n  ],\n  \"skipped\": 0,\n  \"ingested\": 0,\n  \"failed\": [],\n  \"interrupted\": false,\n  \"total\": 2\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "ingest",
+    "command": "uv run --frozen kg-ingest examples/local_memory_demo.jsonl --apply",
+    "seconds": 37.277,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": true,\n  \"ingested\": 2,\n  \"skipped\": 0,\n  \"failed\": [],\n  \"interrupted\": false,\n  \"planned\": [],\n  \"total\": 2\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "initial_query",
+    "command": "uv run --frozen kg ask Which database does Aurora Analytics use for local reports? example",
+    "seconds": 0.905,
+    "exit_code": 0,
+    "stdout": "{\n  \"query\": \"Which database does Aurora Analytics use for local reports?\",\n  \"groups\": [\n    \"example\"\n  ],\n  \"facts\": [\n    {\n      \"fact\": \"Aurora Analytics uses DuckDB for local reports.\",\n      \"uuid\": \"c8e7531a-8f2c-4a58-ac58-f0a4c96eaae7\",\n      \"group_id\": \"\",\n      \"valid_at\": \"2026-01-10T00:00:00\",\n      \"invalid_at\": \"2026-01-24T00:00:00\"\n    },\n    {\n      \"fact\": \"Aurora Analytics stores its documentation in Git.\",\n      \"uuid\": \"b4ccb6cd-cd47-4b95-85c1-8ee0dd281738\",\n      \"group_id\": \"\",\n      \"valid_at\": \"2026-01-24T00:00:00\",\n      \"invalid_at\": null\n    }\n  ],\n  \"pending\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "propose",
+    "command": "uv run --frozen kg propose example Aurora Analytics uses PostgreSQL for its production database. --type source-fact --provenance synthetic demo fixture",
+    "seconds": 0.125,
+    "exit_code": 0,
+    "stdout": "{\n  \"proposed\": \"proposal-124db22b9183\",\n  \"domain\": \"example\",\n  \"fact_type\": \"source-fact\",\n  \"operation\": \"assert\",\n  \"status\": \"pending\"\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "pending",
+    "command": "uv run --frozen kg pending example",
+    "seconds": 0.122,
+    "exit_code": 0,
+    "stdout": "{\n  \"pending\": [\n    {\n      \"id\": \"proposal-124db22b9183\",\n      \"domain\": \"example\",\n      \"text\": \"Aurora Analytics uses PostgreSQL for its production database.\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "before_approval",
+    "command": "uv run --frozen kg ask Which production database does Aurora Analytics use? example",
+    "seconds": 0.924,
+    "exit_code": 0,
+    "stdout": "{\n  \"query\": \"Which production database does Aurora Analytics use?\",\n  \"groups\": [\n    \"example\"\n  ],\n  \"facts\": [\n    {\n      \"fact\": \"Aurora Analytics uses DuckDB for local reports.\",\n      \"uuid\": \"c8e7531a-8f2c-4a58-ac58-f0a4c96eaae7\",\n      \"group_id\": \"\",\n      \"valid_at\": \"2026-01-10T00:00:00\",\n      \"invalid_at\": \"2026-01-24T00:00:00\"\n    },\n    {\n      \"fact\": \"Aurora Analytics stores its documentation in Git.\",\n      \"uuid\": \"b4ccb6cd-cd47-4b95-85c1-8ee0dd281738\",\n      \"group_id\": \"\",\n      \"valid_at\": \"2026-01-24T00:00:00\",\n      \"invalid_at\": null\n    }\n  ],\n  \"pending\": [\n    {\n      \"id\": \"proposal-124db22b9183\",\n      \"domain\": \"example\",\n      \"text\": \"Aurora Analytics uses PostgreSQL for its production database.\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "unapproved_drain",
+    "command": "uv run --frozen kg-workspace drain",
+    "seconds": 0.15,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": false,\n  \"ingested\": 0,\n  \"failed\": [],\n  \"planned\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "approve_fixture",
+    "command": "uv run --frozen kg-workspace approve proposal-124db22b9183",
+    "seconds": 0.135,
+    "exit_code": 0,
+    "stdout": "{\n  \"status\": \"approved\",\n  \"changed\": 1\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "approved_drain_preview",
+    "command": "uv run --frozen kg-workspace drain",
+    "seconds": 0.128,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": false,\n  \"ingested\": 0,\n  \"failed\": [],\n  \"planned\": [\n    {\n      \"id\": \"proposal-124db22b9183\",\n      \"domain\": \"example\",\n      \"body\": \"Aurora Analytics uses PostgreSQL for its production database.\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "apply_fixture",
+    "command": "uv run --frozen kg-workspace drain --apply",
+    "seconds": 36.893,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": true,\n  \"ingested\": 1,\n  \"failed\": [],\n  \"planned\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "after_approval",
+    "command": "uv run --frozen kg ask Which production database does Aurora Analytics use? example",
+    "seconds": 1.43,
+    "exit_code": 0,
+    "stdout": "{\n  \"query\": \"Which production database does Aurora Analytics use?\",\n  \"groups\": [\n    \"example\"\n  ],\n  \"facts\": [\n    {\n      \"fact\": \"Aurora Analytics uses DuckDB for local reports.\",\n      \"uuid\": \"c8e7531a-8f2c-4a58-ac58-f0a4c96eaae7\",\n      \"group_id\": \"\",\n      \"valid_at\": \"2026-01-10T00:00:00\",\n      \"invalid_at\": \"2026-01-24T00:00:00\"\n    },\n    {\n      \"fact\": \"Aurora Analytics uses PostgreSQL for its production database.\",\n      \"uuid\": \"875f7096-27aa-4fa0-924c-5070c09a9e50\",\n      \"group_id\": \"\",\n      \"valid_at\": \"2026-09-11T00:00:00\",\n      \"invalid_at\": null\n    },\n    {\n      \"fact\": \"Aurora Analytics stores its documentation in Git.\",\n      \"uuid\": \"b4ccb6cd-cd47-4b95-85c1-8ee0dd281738\",\n      \"group_id\": \"\",\n      \"valid_at\": \"2026-01-24T00:00:00\",\n      \"invalid_at\": null\n    }\n  ],\n  \"pending\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "verify",
+    "command": "uv run --frozen kg verify",
+    "seconds": 1.18,
+    "exit_code": 0,
+    "stdout": "{\n  \"status\": \"warn\",\n  \"checks\": [\n    {\n      \"check\": \"versions\",\n      \"status\": \"ok\",\n      \"detail\": \"graphiti-local 0.3.0; graphiti-core 0.30.1; ladybug 0.19.1; mcp 1.29.1; python 3.10.20\"\n    },\n    {\n      \"check\": \"config\",\n      \"status\": \"ok\",\n      \"detail\": \"$CHECKOUT/config/ollama.example.yaml parsed; groups: example\"\n    },\n    {\n      \"check\": \"workspace\",\n      \"status\": \"ok\",\n      \"detail\": \"$CHECKOUT/workspace/local-demo-4 is writable\"\n    },\n    {\n      \"check\": \"transport\",\n      \"status\": \"ok\",\n      \"detail\": \"stdio (no network exposure)\"\n    },\n    {\n      \"check\": \"reranker\",\n      \"status\": \"ok\",\n      \"detail\": \"passthrough (no extra model call)\"\n    },\n    {\n      \"check\": \"embedder-model\",\n      \"status\": \"ok\",\n      \"detail\": \"nomic-embed-text is a known model\"\n    },\n    {\n      \"check\": \"embedding-dim-binding\",\n      \"status\": \"ok\",\n      \"detail\": \"graphiti uses 768 dimensions\"\n    },\n    {\n      \"check\": \"embedder-record\",\n      \"status\": \"ok\",\n      \"detail\": \"nomic-embed-text (768 dimensions) wrote this graph\"\n    },\n    {\n      \"check\": \"database\",\n      \"status\": \"ok\",\n      \"detail\": \"ladybug database present at $CHECKOUT/workspace/local-demo-4/graph.ladybug; full-text indexes present\"\n    },\n    {\n      \"check\": \"llm\",\n      \"status\": \"ok\",\n      \"detail\": \"qwen2.5:7b via http://127.0.0.1:11434/v1 (HTTP 200)\"\n    },\n    {\n      \"check\": \"embedder\",\n      \"status\": \"ok\",\n      \"detail\": \"nomic-embed-text returns 768 dimensions\"\n    },\n    {\n      \"check\": \"tool-surface\",\n      \"status\": \"ok\",\n      \"detail\": \"exactly 6 read tools registered\"\n    },\n    {\n      \"check\": \"no-write-tools\",\n      \"status\": \"ok\",\n      \"detail\": \"none exposed\"\n    },\n    {\n      \"check\": \"retrieval\",\n      \"status\": \"ok\",\n      \"detail\": \"search returned 1 fact(s)\"\n    },\n    {\n      \"check\": \"invalidation\",\n      \"status\": \"warn\",\n      \"detail\": \"not checked: no edges found for group ids ['example']\"\n    }\n  ]\n}\n",
+    "stderr": "HTTP Request: POST http://127.0.0.1:11434/v1/embeddings \"HTTP/1.1 200 OK\"\n"
+  }
+]

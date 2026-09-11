@@ -2,17 +2,60 @@
 
 # Graphiti Local
 
-**Local-first temporal knowledge graph.**
+**Local memory for your agents. You approve what they learn.**
 
-Graphiti Local is a small, read-first interface that gives agents six MCP
-retrieval tools, a matching `kg` command-line interface, and a human-gated path
-for adding facts.
+Ask what a project decided, retrieve the supporting facts, and keep proposed
+updates separate until a human approves them. Graphiti Local combines a temporal
+knowledge graph, six read-only MCP tools, and a matching `kg` CLI.
+
+Run with **Ollama + embedded LadybugDB** for local inference and storage, without
+Docker or a cloud API key. Downloads need internet access during setup.
+
+![Synthetic local-memory demo](assets/local-memory-demo.gif)
+
+[Run the complete local walkthrough](docs/local-quickstart.md) ·
+[See the measured results](docs/local-demo-results.md) ·
+[Report your setup result](https://github.com/renezander030/graphiti-local/issues/new?template=setup-result.yml)
+
+Use it when you want agents to retrieve project decisions and propose additions
+for human review. Skip it when you need agents to write directly through MCP, a
+hosted service, or a multi-user database server with no local setup. FalkorDB and
+Neo4j are available when you want a separate database service.
 
 > Graphiti Local is an independent community project built on Graphiti. It is
-> not affiliated with or endorsed by Zep.
+> not affiliated with or endorsed by Zep. Upstream Graphiti also supports Ollama;
+> this package focuses on a small retrieval interface and explicit write approval.
 
-This is a standalone package. It depends on `graphiti-core`; it does not contain
+This standalone package depends on `graphiti-core`; it does not contain
 Graphiti's repository, README, images, examples, or Git history.
+
+## Start locally
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and
+[Ollama](https://docs.ollama.com/quickstart), and start Ollama. The walkthrough
+uses a fresh workspace with synthetic data. Commands below use a POSIX shell.
+
+```bash
+git clone https://github.com/renezander030/graphiti-local.git
+cd graphiti-local
+uv sync --frozen
+ollama pull qwen2.5:7b
+ollama pull nomic-embed-text
+export GRAPHITI_LOCAL_CONFIG="$PWD/config/ollama.example.yaml"
+export KG_WORKSPACE_DIR="$PWD/workspace/local-demo"
+export KG_LADYBUG_PATH="$KG_WORKSPACE_DIR/graph.ladybug"
+uv run --frozen kg-ladybug-setup --database "$KG_LADYBUG_PATH" --apply
+uv run --frozen kg doctor
+uv run --frozen kg-ingest examples/local_memory_demo.jsonl
+uv run --frozen kg-ingest examples/local_memory_demo.jsonl --apply
+uv run --frozen kg ask "Which database does Aurora Analytics use?" example
+```
+
+The example returns a fact about **DuckDB**. Extraction
+wording and timings can vary. The [full walkthrough](docs/local-quickstart.md)
+includes the tested revision, requirements, the approval demonstration, MCP setup,
+and troubleshooting. If this helps your workflow, star the repository to find it
+again and share your setup result so others can reproduce it.
 
 ## What is included
 
@@ -82,77 +125,29 @@ On the embedded Ladybug backend the readers (`graphiti-local`, `kg ask`, `kg exp
 `kg verify`) open the file read-only, so an ingest or a drain runs while the server is
 up, and the server picks up what landed without a restart.
 
-## Quick start
+## Backend choices
 
-Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are recommended.
+The [local walkthrough](docs/local-quickstart.md) uses
+`config/ollama.example.yaml`: Ollama, a 768-dimension `nomic-embed-text` embedder,
+and embedded LadybugDB. All inference endpoints in that example are loopback.
 
-```bash
-uv sync --extra dev
-cp config/falkordb.example.yaml config/falkordb.yaml
-export GRAPHITI_LOCAL_CONFIG="$PWD/config/falkordb.yaml"
-export OPENAI_API_KEY="..."
-uv run kg status
-uv run graphiti-local
-```
+For an existing database service, use `config/falkordb.example.yaml` or
+`config/neo4j.example.yaml` and configure its connection and model credentials.
+`config/ladybug.example.yaml` pairs embedded storage with a cloud model provider.
+These are separate deployment choices; local storage alone does not make inference local.
 
-For an MCP client using stdio:
-
-```json
-{
-  "mcpServers": {
-    "kg": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/graphiti-local", "run", "graphiti-local"],
-      "env": {
-        "GRAPHITI_LOCAL_CONFIG": "/path/to/graphiti-local/config/falkordb.yaml"
-      }
-    }
-  }
-}
-```
-
-The two example configurations use only synthetic group names and environment
-variable references. FalkorDB and Neo4j are supported server backends. LadybugDB
-provides an embedded single-file backend:
-
-```bash
-cp config/ladybug.example.yaml config/ladybug.yaml
-export GRAPHITI_LOCAL_CONFIG="$PWD/config/ladybug.yaml"
-uv run kg-ladybug-setup --database ./workspace/example.ladybug
-# Review the dry run, then repeat with --apply in a network-enabled environment.
-```
-
-With `--apply` the command installs the search extensions, creates the schema and the
-four full-text indexes hybrid search queries. A database prepared this way answers
-`kg ask` before anything is ingested. Opening a Ladybug graph never installs extensions
-automatically, and a reader refuses a file without the indexes and names this command.
-A database created by 0.2.x has no indexes: run the command once more on it.
-
-## Running without a cloud provider
-
-`config/ollama.example.yaml` runs the graph entirely on your machine — a local model
-for extraction, a local embedder, and the embedded Ladybug backend. No API key, no
-data leaving the host:
-
-```bash
-ollama pull qwen2.5:7b && ollama pull nomic-embed-text
-cp config/ollama.example.yaml config/ollama.yaml
-export GRAPHITI_LOCAL_CONFIG="$PWD/config/ollama.yaml"
-uv run kg doctor
-```
-
-Ollama speaks the OpenAI API on `/v1`, so both clients point at it.
-`structured_output_mode: json_object` suits local models, which mostly do not
-implement the strict `json_schema` response format. Mind the vector width:
-`nomic-embed-text` returns 768, not the 1536 an OpenAI default assumes.
+An embedded database needs its schema, search extensions, and four full-text
+indexes before the read-only server opens it. `kg-ladybug-setup --apply` prepares
+them explicitly. Opening a reader never installs extensions automatically.
+For a database created by 0.2.x, run setup again to add the indexes.
 
 ## Explicit ingestion
 
 Ingestion is a separate command and is dry-run by default:
 
 ```bash
-uv run kg-ingest examples/synthetic_episodes.jsonl
-uv run kg-ingest examples/synthetic_episodes.jsonl --apply
+uv run kg-ingest examples/local_memory_demo.jsonl
+uv run kg-ingest examples/local_memory_demo.jsonl --apply
 ```
 
 Inputs are UTF-8 JSONL objects with `name` and `body`; `domain`, `valid_at`, and
@@ -232,6 +227,8 @@ uv run python scripts/release_audit.py .
 
 See [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md), and
 [UPSTREAM.md](UPSTREAM.md) for the deployment and provenance boundaries.
+
+For a directory evaluation container, see [MCP discovery container](docs/container.md).
 
 ## Related tools
 

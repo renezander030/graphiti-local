@@ -1,0 +1,316 @@
+{
+  "tools": [
+    "get_entity_edge",
+    "get_episode_entities",
+    "get_episodes",
+    "get_status",
+    "search_memory_facts",
+    "search_nodes"
+  ],
+  "schemas": {
+    "search_nodes": {
+      "properties": {
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "group_ids": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Ids"
+        },
+        "max_nodes": {
+          "default": 10,
+          "title": "Max Nodes",
+          "type": "integer"
+        },
+        "entity_types": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entity Types"
+        },
+        "center_node_uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Center Node Uuid"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "search_nodesArguments",
+      "type": "object"
+    },
+    "search_memory_facts": {
+      "properties": {
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "group_ids": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Ids"
+        },
+        "max_facts": {
+          "default": 10,
+          "title": "Max Facts",
+          "type": "integer"
+        },
+        "center_node_uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Center Node Uuid"
+        },
+        "edge_types": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edge Types"
+        },
+        "valid_at_after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid At After"
+        },
+        "valid_at_before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid At Before"
+        },
+        "invalid_at_after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Invalid At After"
+        },
+        "invalid_at_before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Invalid At Before"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "search_memory_factsArguments",
+      "type": "object"
+    },
+    "get_entity_edge": {
+      "properties": {
+        "uuid": {
+          "title": "Uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "uuid"
+      ],
+      "title": "get_entity_edgeArguments",
+      "type": "object"
+    },
+    "get_episodes": {
+      "properties": {
+        "group_ids": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Ids"
+        },
+        "max_episodes": {
+          "default": 10,
+          "title": "Max Episodes",
+          "type": "integer"
+        }
+      },
+      "title": "get_episodesArguments",
+      "type": "object"
+    },
+    "get_episode_entities": {
+      "properties": {
+        "episode_uuids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Episode Uuids",
+          "type": "array"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        }
+      },
+      "required": [
+        "episode_uuids"
+      ],
+      "title": "get_episode_entitiesArguments",
+      "type": "object"
+    },
+    "get_status": {
+      "properties": {},
+      "title": "get_statusArguments",
+      "type": "object"
+    }
+  },
+  "status": {
+    "meta": null,
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"status\": \"ok\",\n  \"message\": \"Graphiti Local is connected to ladybug\"\n}",
+        "annotations": null,
+        "meta": null
+      }
+    ],
+    "structuredContent": {
+      "status": "ok",
+      "message": "Graphiti Local is connected to ladybug"
+    },
+    "isError": false
+  },
+  "query": {
+    "meta": null,
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"message\": \"Facts retrieved successfully\",\n  \"facts\": [\n    {\n      \"uuid\": \"b374bcc8-ab24-49b7-bb8a-5a03244ff908\",\n      \"name\": \"USES\",\n      \"fact\": \"Aurora Analytics uses DuckDB as its database.\",\n      \"source_node_uuid\": \"ef117193-bc6f-49c0-ac5e-40370b79c9ed\",\n      \"target_node_uuid\": \"352b090b-d4af-487e-a7f0-c3c71a2ea54f\",\n      \"group_id\": \"\",\n      \"created_at\": \"2026-09-11T10:54:39.732412\",\n      \"valid_at\": \"2026-01-10T00:00:00\",\n      \"invalid_at\": \"2026-09-11T00:00:00\"\n    },\n    {\n      \"uuid\": \"7290d5fd-5f29-4568-a8fe-8010de57e172\",\n      \"name\": \"USES\",\n      \"fact\": \"Aurora Analytics uses PostgreSQL as its database.\",\n      \"source_node_uuid\": \"ef117193-bc6f-49c0-ac5e-40370b79c9ed\",\n      \"target_node_uuid\": \"2487aab1-9c39-48e0-ad0d-36686961307c\",\n      \"group_id\": \"\",\n      \"created_at\": \"2026-09-11T10:55:24.321439\",\n      \"valid_at\": \"2026-09-11T00:00:00\",\n      \"invalid_at\": null\n    }\n  ]\n}",
+        "annotations": null,
+        "meta": null
+      }
+    ],
+    "structuredContent": {
+      "message": "Facts retrieved successfully",
+      "facts": [
+        {
+          "uuid": "b374bcc8-ab24-49b7-bb8a-5a03244ff908",
+          "name": "USES",
+          "fact": "Aurora Analytics uses DuckDB as its database.",
+          "source_node_uuid": "ef117193-bc6f-49c0-ac5e-40370b79c9ed",
+          "target_node_uuid": "352b090b-d4af-487e-a7f0-c3c71a2ea54f",
+          "group_id": "",
+          "created_at": "2026-09-11T10:54:39.732412",
+          "valid_at": "2026-01-10T00:00:00",
+          "invalid_at": "2026-09-11T00:00:00"
+        },
+        {
+          "uuid": "7290d5fd-5f29-4568-a8fe-8010de57e172",
+          "name": "USES",
+          "fact": "Aurora Analytics uses PostgreSQL as its database.",
+          "source_node_uuid": "ef117193-bc6f-49c0-ac5e-40370b79c9ed",
+          "target_node_uuid": "2487aab1-9c39-48e0-ad0d-36686961307c",
+          "group_id": "",
+          "created_at": "2026-09-11T10:55:24.321439",
+          "valid_at": "2026-09-11T00:00:00",
+          "invalid_at": null
+        }
+      ]
+    },
+    "isError": false
+  }
+}

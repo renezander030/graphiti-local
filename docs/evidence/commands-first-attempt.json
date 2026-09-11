@@ -1,0 +1,106 @@
+[
+  {
+    "label": "doctor",
+    "command": "uv run --frozen kg doctor",
+    "seconds": 1.563,
+    "exit_code": 0,
+    "stdout": "{\n  \"status\": \"warn\",\n  \"checks\": [\n    {\n      \"check\": \"versions\",\n      \"status\": \"ok\",\n      \"detail\": \"graphiti-local 0.3.0; graphiti-core 0.30.1; ladybug 0.19.1; mcp 1.29.1; python 3.10.20\"\n    },\n    {\n      \"check\": \"config\",\n      \"status\": \"ok\",\n      \"detail\": \"$CHECKOUT/config/ollama.example.yaml parsed; groups: example\"\n    },\n    {\n      \"check\": \"workspace\",\n      \"status\": \"ok\",\n      \"detail\": \"$CHECKOUT/workspace/local-demo is writable\"\n    },\n    {\n      \"check\": \"transport\",\n      \"status\": \"ok\",\n      \"detail\": \"stdio (no network exposure)\"\n    },\n    {\n      \"check\": \"reranker\",\n      \"status\": \"ok\",\n      \"detail\": \"passthrough (no extra model call)\"\n    },\n    {\n      \"check\": \"embedder-model\",\n      \"status\": \"ok\",\n      \"detail\": \"nomic-embed-text is a known model\"\n    },\n    {\n      \"check\": \"embedding-dim-binding\",\n      \"status\": \"ok\",\n      \"detail\": \"graphiti uses 768 dimensions\"\n    },\n    {\n      \"check\": \"embedder-record\",\n      \"status\": \"warn\",\n      \"detail\": \"no embedder recorded yet; the first ingest or restore records it\"\n    },\n    {\n      \"check\": \"database\",\n      \"status\": \"ok\",\n      \"detail\": \"ladybug database present at $CHECKOUT/workspace/local-demo/graph.ladybug; full-text indexes present\"\n    },\n    {\n      \"check\": \"llm\",\n      \"status\": \"ok\",\n      \"detail\": \"qwen2.5:7b via http://127.0.0.1:11434/v1 (HTTP 200)\"\n    },\n    {\n      \"check\": \"embedder\",\n      \"status\": \"ok\",\n      \"detail\": \"nomic-embed-text returns 768 dimensions\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "empty_query",
+    "command": "uv run --frozen kg ask What did Example Project select? example",
+    "seconds": 1.154,
+    "exit_code": 0,
+    "stdout": "{\n  \"query\": \"What did Example Project select?\",\n  \"groups\": [\n    \"example\"\n  ],\n  \"facts\": [],\n  \"pending\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "ingest_preview",
+    "command": "uv run --frozen kg-ingest examples/synthetic_episodes.jsonl",
+    "seconds": 0.549,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": false,\n  \"planned\": [\n    {\n      \"domain\": \"example\",\n      \"name\": \"Project kickoff\"\n    },\n    {\n      \"domain\": \"example\",\n      \"name\": \"Validation result\"\n    }\n  ],\n  \"skipped\": 0,\n  \"ingested\": 0,\n  \"failed\": [],\n  \"interrupted\": false,\n  \"total\": 2\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "ingest",
+    "command": "uv run --frozen kg-ingest examples/synthetic_episodes.jsonl --apply",
+    "seconds": 39.69,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": true,\n  \"ingested\": 2,\n  \"skipped\": 0,\n  \"failed\": [],\n  \"interrupted\": false,\n  \"planned\": [],\n  \"total\": 2\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "initial_query",
+    "command": "uv run --frozen kg ask What validation cycle did Example Project select? example",
+    "seconds": 1.14,
+    "exit_code": 0,
+    "stdout": "{\n  \"query\": \"What validation cycle did Example Project select?\",\n  \"groups\": [\n    \"example\"\n  ],\n  \"facts\": [\n    {\n      \"fact\": \"Example Project selected a two-week validation cycle.\",\n      \"uuid\": \"c42a8652-d286-4568-bfb8-8fe15da1e14a\",\n      \"group_id\": \"\",\n      \"valid_at\": \"2026-01-10T09:00:00\",\n      \"invalid_at\": null\n    }\n  ],\n  \"pending\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "propose",
+    "command": "uv run --frozen kg propose example Example Project uses cobalt-blue as its release label. --type source-fact --provenance synthetic demo fixture",
+    "seconds": 0.113,
+    "exit_code": 0,
+    "stdout": "{\n  \"proposed\": \"proposal-fa9e8c8eac77\",\n  \"domain\": \"example\",\n  \"fact_type\": \"source-fact\",\n  \"operation\": \"assert\",\n  \"status\": \"pending\"\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "pending",
+    "command": "uv run --frozen kg pending example",
+    "seconds": 0.109,
+    "exit_code": 0,
+    "stdout": "{\n  \"pending\": [\n    {\n      \"id\": \"proposal-fa9e8c8eac77\",\n      \"domain\": \"example\",\n      \"text\": \"Example Project uses cobalt-blue as its release label.\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "before_approval",
+    "command": "uv run --frozen kg ask What is the release label for Example Project? example",
+    "seconds": 0.792,
+    "exit_code": 0,
+    "stdout": "{\n  \"query\": \"What is the release label for Example Project?\",\n  \"groups\": [\n    \"example\"\n  ],\n  \"facts\": [],\n  \"pending\": [\n    {\n      \"id\": \"proposal-fa9e8c8eac77\",\n      \"domain\": \"example\",\n      \"text\": \"Example Project uses cobalt-blue as its release label.\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "unapproved_drain",
+    "command": "uv run --frozen kg-workspace drain",
+    "seconds": 0.603,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": false,\n  \"ingested\": 0,\n  \"failed\": [],\n  \"planned\": []\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "approve_fixture",
+    "command": "uv run --frozen kg-workspace approve proposal-fa9e8c8eac77",
+    "seconds": 0.108,
+    "exit_code": 0,
+    "stdout": "{\n  \"status\": \"approved\",\n  \"changed\": 1\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "approved_drain_preview",
+    "command": "uv run --frozen kg-workspace drain",
+    "seconds": 0.098,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": false,\n  \"ingested\": 0,\n  \"failed\": [],\n  \"planned\": [\n    {\n      \"id\": \"proposal-fa9e8c8eac77\",\n      \"domain\": \"example\",\n      \"body\": \"Example Project uses cobalt-blue as its release label.\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "label": "apply_fixture",
+    "command": "uv run --frozen kg-workspace drain --apply",
+    "seconds": 16.554,
+    "exit_code": 0,
+    "stdout": "{\n  \"applied\": true,\n  \"ingested\": 1,\n  \"failed\": [],\n  \"planned\": []\n}\n",
+    "stderr": "Source entity not found in nodes for edge relation: USES_RELEASE_LABEL\n"
+  },
+  {
+    "label": "after_approval",
+    "command": "uv run --frozen kg ask What is the release label for Example Project? example",
+    "seconds": 0.848,
+    "exit_code": 0,
+    "stdout": "{\n  \"query\": \"What is the release label for Example Project?\",\n  \"groups\": [\n    \"example\"\n  ],\n  \"facts\": [],\n  \"pending\": []\n}\n",
+    "stderr": ""
+  }
+]
