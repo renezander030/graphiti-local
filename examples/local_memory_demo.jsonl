@@ -1,0 +1,1 @@
+{"name":"Initial database decision","body":"Aurora Analytics uses DuckDB as its database.","domain":"example","valid_at":"2026-01-10T09:00:00Z","provenance":"synthetic local memory demo"}

@@ -1,0 +1,26 @@
+name: Container MCP smoke
+on:
+  push:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - config/ollama.example.yaml
+      - scripts/mcp_smoke.py
+      - .github/workflows/container.yml
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: docker build -t graphiti-local-smoke .
+      - run: uv run --frozen python scripts/mcp_smoke.py docker run --rm -i graphiti-local-smoke

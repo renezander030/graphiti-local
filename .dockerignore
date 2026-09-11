@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!src
+!src/**
+!config
+!config/ollama.example.yaml
+**/__pycache__

@@ -4,8 +4,8 @@
 #   ollama pull nomic-embed-text
 #
 # Ollama exposes an OpenAI-compatible API on /v1, so both clients point at it.
-# structured_output_mode is json_object because most local models do not implement
-# the strict json_schema response format.
+# Ollama supports schema-constrained structured output. Use json_schema so a local
+# model returns a schema instance rather than echoing the schema itself.
 #
 # The embedder dimensions below MUST match the model: nomic-embed-text returns 768,
 # not the 1536 the OpenAI default assumes. `kg doctor` probes the live endpoint and
@@ -35,7 +35,8 @@ llm:
   model: ${KG_LLM_MODEL:qwen2.5:7b}
   api_url: ${KG_LLM_API_URL:http://127.0.0.1:11434/v1}
   api_key: ${KG_LLM_API_KEY:ollama}
-  structured_output_mode: json_object
+  structured_output_mode: json_schema
+  temperature: 0
 
 embedder:
   model: ${KG_EMBEDDER_MODEL:nomic-embed-text}
