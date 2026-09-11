@@ -1,3 +1,5 @@
+![Graphiti Local](assets/graphiti-local-logo.png)
+
 # Graphiti Local
 
 **Local-first temporal knowledge graph.**
