@@ -51,5 +51,7 @@ FalkorDB and Neo4j are also supported.
 
 If this helps your workflow, star the repository and share your setup result.
 
+Maintained by [René Zander](https://renezander.com/projects/graphiti-local/), who builds context layers for AI agents on temporal knowledge graphs.
+
 Independent community project built on [Graphiti](https://github.com/getzep/graphiti),
 not affiliated with or endorsed by Zep. [Apache-2.0](LICENSE).
