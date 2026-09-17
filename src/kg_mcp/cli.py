@@ -82,6 +82,47 @@ def _doctor_command(args: argparse.Namespace) -> dict[str, Any]:
     return {"status": worst_status(results), "checks": results}
 
 
+def _keyword_edge_config(limit: int):
+    """Edge search on BM25 alone, reranked by reciprocal rank fusion.
+
+    The vector half of the default hybrid search embeds the query, which means an
+    embedding backend has to be reachable before any question can be answered. Keyword
+    search needs no such call, so a shipped graph stays readable on a machine with
+    nothing running. Reciprocal rank fusion is kept because it orders a single result
+    list unchanged and costs no extra call.
+    """
+    from graphiti_core.search.search_config import EdgeReranker
+    from graphiti_core.search.search_config import EdgeSearchConfig
+    from graphiti_core.search.search_config import EdgeSearchMethod
+    from graphiti_core.search.search_config import SearchConfig
+
+    return SearchConfig(
+        edge_config=EdgeSearchConfig(search_methods=[EdgeSearchMethod.bm25], reranker=EdgeReranker.rrf),
+        limit=limit,
+    )
+
+
+def _keyword_node_config(limit: int):
+    """Node equivalent of :func:`_keyword_edge_config`."""
+    from graphiti_core.search.search_config import NodeReranker
+    from graphiti_core.search.search_config import NodeSearchConfig
+    from graphiti_core.search.search_config import NodeSearchMethod
+    from graphiti_core.search.search_config import SearchConfig
+
+    return SearchConfig(
+        node_config=NodeSearchConfig(search_methods=[NodeSearchMethod.bm25], reranker=NodeReranker.rrf),
+        limit=limit,
+    )
+
+
+async def _edge_search(graph: Any, args: argparse.Namespace, groups: list[str] | None):
+    """Return matching edges, keyword only when the caller asked for it."""
+    if not getattr(args, "keyword", False):
+        return await graph.search(args.query, group_ids=groups, num_results=args.limit)
+    results = await graph.search_(args.query, config=_keyword_edge_config(args.limit), group_ids=groups)
+    return results.edges[: args.limit]
+
+
 async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
     settings = load_config()
     from kg_mcp.runtime import build_graphiti
@@ -92,7 +133,7 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
         if args.command == "ask":
             groups = allowed_groups(args.groups, settings)
             results = await bounded(
-                graph.search(args.query, group_ids=groups, num_results=args.limit),
+                _edge_search(graph, args, groups),
                 timeout,
                 "ask",
             )
@@ -115,8 +156,9 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
             groups = allowed_groups(args.groups, settings)
             from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 
+            node_config = _keyword_node_config(args.limit) if args.keyword else NODE_HYBRID_SEARCH_RRF
             result = await bounded(
-                graph.search_(args.query, config=NODE_HYBRID_SEARCH_RRF, group_ids=groups),
+                graph.search_(args.query, config=node_config, group_ids=groups),
                 timeout,
                 "nodes",
             )
@@ -324,6 +366,15 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("query")
         command.add_argument("groups", nargs="*")
         command.add_argument("--limit", type=int, default=10)
+        command.add_argument(
+            "--keyword",
+            action="store_true",
+            help=(
+                "Match on keywords only (BM25), skipping the vector half of the search. "
+                "No embedding model is called, so this answers on a machine with no "
+                "inference backend running, at the cost of missing paraphrases."
+            ),
+        )
     episodes = commands.add_parser("episodes", parents=[common])
     episodes.add_argument("groups", nargs="*")
     episodes.add_argument("--limit", type=int, default=10)
