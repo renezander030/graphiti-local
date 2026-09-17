@@ -13,6 +13,19 @@ cloud API key is needed for the local setup.
 
 *Captured output excerpts with pauses condensed. [Measured results and limitations](docs/local-demo-results.md).*
 
+## Try it in one command
+
+```bash
+uvx --from git+https://github.com/renezander030/graphiti-local kg-demo
+```
+
+Answers a question against a small synthetic graph shipped with the package. No Ollama,
+no model downloads, no database setup: retrieval runs on keywords alone, so nothing
+contacts a model. Ask your own question by passing it as an argument.
+
+This is the read path only. Building a graph from your own text needs extraction, which
+needs a model, and that is the full setup below.
+
 ## Try it locally
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and
