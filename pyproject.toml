@@ -43,6 +43,7 @@ graphiti-local = "kg_mcp.server:main"
 kg-ingest = "kg_mcp.ingest:main"
 kg-workspace = "kg_mcp.workspace:main"
 kg-ladybug-setup = "kg_mcp.ladybug:setup_main"
+kg-demo = "kg_mcp.demo:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kg_mcp"]

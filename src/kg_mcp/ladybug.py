@@ -232,6 +232,20 @@ def setup_main() -> None:
         print("dry run only; add --apply in a trusted network-enabled environment")
         return
 
+    setup_database(target)
+
+
+def setup_database(target: Path, *, quiet: bool = False) -> list[str]:
+    """Install the search extensions, create the schema and the full-text indexes.
+
+    Split out of :func:`setup_main` so callers that already know the path, such as the
+    shipped demo, can prepare a database without going through argv.
+    """
+
+    def say(message: str) -> None:
+        if not quiet:
+            print(message)
+
     ladybug = _alias_kuzu()
     from graphiti_core.driver.kuzu_driver import SCHEMA_QUERIES
 
@@ -241,10 +255,11 @@ def setup_main() -> None:
     for extension in EXTENSIONS:
         connection.execute(f"INSTALL {extension}")
         connection.execute(f"LOAD EXTENSION {extension}")
-        print(f"{extension}: installed and loaded")
+        say(f"{extension}: installed and loaded")
     connection.execute(SCHEMA_QUERIES)
     created = ensure_indexes(connection)
-    print("schema: ready")
-    print(f"full-text indexes created: {', '.join(created) or 'none (already present)'}")
+    say("schema: ready")
+    say(f"full-text indexes created: {', '.join(created) or 'none (already present)'}")
     connection.close()
     database.close()
+    return created

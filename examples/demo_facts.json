@@ -1,0 +1,11 @@
+{
+  "group_id": "demo",
+  "note": "A small synthetic graph shipped so a first question can be answered before anything is installed. Facts are invented, not scraped.",
+  "facts": [
+    {"source": "Aurora Analytics", "target": "DuckDB", "name": "USES_DATABASE", "fact": "Aurora Analytics uses DuckDB as its database.", "valid_at": "2026-02-01T00:00:00+00:00"},
+    {"source": "Aurora Analytics", "target": "PostgreSQL", "name": "MIGRATED_TO", "fact": "Aurora Analytics migrated from DuckDB to PostgreSQL for its warehouse in June 2026.", "valid_at": "2026-06-14T00:00:00+00:00"},
+    {"source": "Payments team", "target": "Go", "name": "WRITES_SERVICE_IN", "fact": "The payments team writes its services in Go rather than Python.", "valid_at": "2026-03-09T00:00:00+00:00"},
+    {"source": "Aurora Analytics", "target": "nightly rebuild", "name": "REFRESH_STRATEGY", "fact": "Aurora Analytics rebuilds its reporting tables nightly instead of streaming updates.", "valid_at": "2026-04-22T00:00:00+00:00"},
+    {"source": "Release process", "target": "two approvals", "name": "REQUIRES", "fact": "A release to production requires two approvals, one of them from the on call engineer.", "valid_at": "2026-05-30T00:00:00+00:00"}
+  ]
+}
