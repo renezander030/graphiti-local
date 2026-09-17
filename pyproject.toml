@@ -46,6 +46,7 @@ kg-ladybug-setup = "kg_mcp.ladybug:setup_main"
 kg-demo = "kg_mcp.demo:main"
 
 [tool.hatch.build.targets.wheel]
+artifacts = ["src/kg_mcp/demo_facts.json"]
 packages = ["src/kg_mcp"]
 
 [tool.pytest.ini_options]

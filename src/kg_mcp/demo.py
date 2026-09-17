@@ -65,7 +65,13 @@ def _demo_home() -> Path:
 
 
 def _facts_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "examples" / "demo_facts.json"
+    """The shipped facts live inside the package, not beside it.
+
+    An installed wheel contains only the package directory, so anything resolved
+    relative to the repository root exists while developing and is missing the moment
+    someone installs from git. That is the failure this demo exists to avoid.
+    """
+    return Path(__file__).with_name("demo_facts.json")
 
 
 async def _build(database: Path) -> int:
