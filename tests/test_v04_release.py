@@ -19,17 +19,20 @@ def test_mcp_registry_manifest_matches_the_python_release():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "server.json").read_text(encoding="utf-8"))
     assert manifest["name"] == "io.github.renezander030/graphiti-local"
-    assert manifest["version"] == "0.4.0"
+    assert manifest["version"] == "0.4.1"
     assert manifest["packages"] == [
         {
             "registryType": "pypi",
             "identifier": "graphiti-local",
-            "version": "0.4.0",
+            "version": "0.4.1",
             "transport": {"type": "stdio"},
         }
     ]
     marker = f"mcp-name: {manifest['name']}"
-    assert marker in (root / "README.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert marker in readme
+    assert "![Graphiti Local](https://raw.githubusercontent.com/" in readme
+    assert "![42-second synthetic memory demo](https://raw.githubusercontent.com/" in readme
 
 
 def test_rotating_tokens_validate_group_scopes():

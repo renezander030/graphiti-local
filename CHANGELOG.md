@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- Use absolute HTTPS URLs for the README logo and demo so both images render in the
+  PyPI project description as well as on GitHub.
+
 ## 0.4.0
 
 This release makes the review boundary apply to model extraction itself, makes current

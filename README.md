@@ -1,4 +1,4 @@
-![Graphiti Local](assets/graphiti-local-logo.png)
+![Graphiti Local](https://raw.githubusercontent.com/renezander030/graphiti-local/main/assets/graphiti-local-logo.png)
 
 # Graphiti Local
 
@@ -9,7 +9,7 @@ Proposed updates stay in a separate queue until a human approves and applies the
 Ollama handles local inference; embedded LadybugDB stores the graph. No Docker or
 cloud API key is needed for the local setup.
 
-![42-second synthetic memory demo](assets/local-memory-demo.gif)
+![42-second synthetic memory demo](https://raw.githubusercontent.com/renezander030/graphiti-local/main/assets/local-memory-demo.gif)
 
 *Captured output excerpts with pauses condensed. [Measured results and limitations](docs/local-demo-results.md).*
 
