@@ -35,7 +35,12 @@ PATTERNS = {
 }
 
 
-def audit(root: Path, *, allow_remote: bool = False) -> list[str]:
+def audit(
+    root: Path,
+    *,
+    allow_remote: bool = False,
+    identity_base: str = "origin/HEAD",
+) -> list[str]:
     findings = []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
@@ -63,7 +68,7 @@ def audit(root: Path, *, allow_remote: bool = False) -> list[str]:
             [
                 "git",
                 "log",
-                identity_revision(root),
+                identity_revision(root, identity_base),
                 "--format=%an <%ae>%n%cn <%ce>",
             ],
             cwd=root,
@@ -76,10 +81,10 @@ def audit(root: Path, *, allow_remote: bool = False) -> list[str]:
     return findings
 
 
-def identity_revision(root: Path) -> str:
+def identity_revision(root: Path, base_revision: str = "origin/HEAD") -> str:
     """Audit unpublished commits when the remote default branch is available."""
     base = subprocess.run(
-        ["git", "merge-base", "origin/HEAD", "HEAD"],
+        ["git", "merge-base", base_revision, "HEAD"],
         cwd=root,
         capture_output=True,
         text=True,
@@ -119,8 +124,17 @@ def main() -> None:
         action="store_true",
         help="allow the expected Git remote in CI or an already-published checkout",
     )
+    parser.add_argument(
+        "--identity-base",
+        default="origin/HEAD",
+        help="compare commit identities with this published base revision",
+    )
     args = parser.parse_args()
-    findings = audit(args.root.resolve(), allow_remote=args.allow_remote)
+    findings = audit(
+        args.root.resolve(),
+        allow_remote=args.allow_remote,
+        identity_base=args.identity_base,
+    )
     if findings:
         print("release audit failed:")
         for finding in findings:
