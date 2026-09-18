@@ -15,6 +15,23 @@ from filelock import FileLock
 from kg_mcp.config import Settings, TokenGrant
 
 
+def test_mcp_registry_manifest_matches_the_python_release():
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads((root / "server.json").read_text(encoding="utf-8"))
+    assert manifest["name"] == "io.github.renezander030/graphiti-local"
+    assert manifest["version"] == "0.4.0"
+    assert manifest["packages"] == [
+        {
+            "registryType": "pypi",
+            "identifier": "graphiti-local",
+            "version": "0.4.0",
+            "transport": {"type": "stdio"},
+        }
+    ]
+    marker = f"mcp-name: {manifest['name']}"
+    assert marker in (root / "README.md").read_text(encoding="utf-8")
+
+
 def test_rotating_tokens_validate_group_scopes():
     settings = Settings.model_validate(
         {

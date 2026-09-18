@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.renezander030/graphiti-local",
+  "title": "Graphiti Local",
+  "description": "Local-first temporal knowledge graph with six read-only MCP tools and human-reviewed writes.",
+  "repository": {
+    "url": "https://github.com/renezander030/graphiti-local",
+    "source": "github"
+  },
+  "version": "0.4.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "graphiti-local",
+      "version": "0.4.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
