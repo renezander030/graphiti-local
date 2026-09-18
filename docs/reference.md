@@ -16,7 +16,7 @@ There are no MCP write, delete, clear, approval, or maintenance tools.
 The CLI provides:
 
 ```text
-kg ask "question" [group ...]
+kg ask "question" [group ...] [--history]
 kg nodes "query" [group ...]
 kg episodes [group ...]
 kg edge UUID
@@ -66,7 +66,15 @@ just as silent, and a later ingest or restore refuses it with exit code `2`.
 
 On the embedded Ladybug backend the readers (`graphiti-local`, `kg ask`, `kg export`,
 `kg verify`) open the file read-only, so an ingest or a drain runs while the server is
-up, and the server picks up what landed without a restart.
+up, and the server picks up what landed without a restart. All embedded write paths use
+the same cross-process lock. They wait up to `graph.writer_lock_timeout_seconds` and
+name the active-writer conflict instead of racing the database.
+
+`kg ask` and `search_memory_facts` return current facts by default: a fact whose
+`invalid_at` timestamp has passed is suppressed. Use `kg ask --history` or MCP's
+`include_invalidated: true` only when historical facts are intentional. Fact results
+include their final reranker score, validity timestamps, the selected ranker, and a
+count of invalidated candidates that were suppressed.
 
 ## Backend choices
 
@@ -102,6 +110,20 @@ instead of duplicating it. A record that fails is isolated and reported; the res
 the batch still lands, and the failure sets a non-zero exit code. Use `--no-resume`
 to ignore the ledger and `--fail-fast` for the old stop-at-first-error behaviour.
 
+To inspect model extraction before it reaches the configured graph, stage it:
+
+```bash
+kg-ingest notes.jsonl --review-output ./review.jsonl
+# inspect the entity_node, entity_edge, and episodic records in review.jsonl
+kg-ingest ./review.jsonl --restore --group team-a --apply
+```
+
+The first command creates a disposable embedded graph, runs extraction there, exports
+the exact resolved records, and removes the temporary database. It never opens the
+configured production backend. One review snapshot accepts one domain so its promotion
+target remains explicit. The printed `promote` command restores the reviewed records
+without running extraction again.
+
 `SIGTERM` and `SIGINT` stop it at a record boundary rather than mid-write: it finishes
 the record in flight, closes the driver, and reports `interrupted`. This matters when a
 cron job wraps the run in a `timeout` — extraction is slow on a local model, and a
@@ -116,10 +138,12 @@ kg export                                    # every group, to a timestamped JSO
 kg export example --output ./snapshot.jsonl  # a named group to a chosen path
 ```
 
-The snapshot is written from the graphiti models rather than backend rows, so it is
-readable whichever backend produced it. Embeddings are omitted deliberately: they are
-derived from the text, and a vector restored under a different embedding model would
-be silently wrong.
+The snapshot is written atomically from the graphiti models rather than backend rows,
+so it is readable whichever backend produced it. Version 2 snapshots carry a record
+count and SHA-256 digest; restore verifies both before opening a writable graph. Export
+fails closed if any record kind cannot be collected. Version 1 snapshots remain
+readable. Embeddings are omitted deliberately: they are derived from the text, and a
+vector restored under a different embedding model would be silently wrong.
 
 ```bash
 kg-ingest ./snapshot.jsonl --restore                    # dry run: what would land where
@@ -145,9 +169,12 @@ other correction.
 
 - Graphiti telemetry is disabled before its package is imported.
 - HTTP defaults to loopback; stdio is the example default.
-- The `streamable-http` transport refuses to start without `server.auth.token`,
-  and every request over it must carry that bearer token. stdio is a private pipe;
-  a network port is reachable by anything that can open it.
+- The `streamable-http` transport refuses to start without a bearer token. The compact
+  `server.auth.token` form remains supported; `server.auth.tokens` binds named,
+  overlapping tokens to group lists for least-privilege access and zero-downtime
+  rotation. Every MCP tool enforces the authenticated token's group scope. Ladybug
+  rejects partial scopes because one embedded graph cannot isolate them. stdio is a
+  private pipe; a network port is reachable by anything that can open it.
 - Behind a reverse proxy, `server.allowed_hosts` lists the Host names the MCP SDK's
   DNS-rebinding check accepts (`["kg.example.internal:*"]`). Without it the SDK default
   applies: loopback names only on a loopback host, no check elsewhere.
@@ -159,6 +186,23 @@ other correction.
 - Proposal approval and application are separate human actions.
 - `kg-workspace drain` archives a proposal only after it actually lands. A failed
   ingest leaves it approved so the next drain retries it.
+
+## Retrieval and model controls
+
+`reranker.candidate_multiplier` controls how many RRF candidates reach the configured
+cross encoder, and `reranker.min_score` filters only its final scores. Equal fact text
+does not collapse distinct edge UUIDs. `passthrough` keeps the original order without
+an extra model call.
+
+FalkorDB queries remove only a standalone `_` token, which RediSearch reserves, and a
+multi-label node search fans out by label before merging UUIDs. Identifiers such as
+`foo_bar` are unchanged.
+
+`llm.max_tokens` is a hard output ceiling for every extraction call, including an
+upstream prompt that requests a larger budget. `llm.api_mode` selects `responses`,
+`chat`, or `auto`; `auto` uses Responses on the official OpenAI endpoint and Chat
+Completions for compatible endpoints. Set it explicitly for a proxy whose URL does
+not reveal which API family it implements.
 
 Run the release gate before sharing:
 

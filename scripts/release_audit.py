@@ -60,7 +60,12 @@ def audit(root: Path, *, allow_remote: bool = False) -> list[str]:
         if remote and not allow_remote:
             findings.append("git metadata: remote configured")
         identities = subprocess.run(
-            ["git", "log", "--format=%an <%ae>%n%cn <%ce>"],
+            [
+                "git",
+                "log",
+                identity_revision(root),
+                "--format=%an <%ae>%n%cn <%ce>",
+            ],
             cwd=root,
             check=True,
             capture_output=True,
@@ -69,6 +74,30 @@ def audit(root: Path, *, allow_remote: bool = False) -> list[str]:
         if sensitive_identities(identities):
             findings.append("git metadata: sensitive author identity")
     return findings
+
+
+def identity_revision(root: Path) -> str:
+    """Audit unpublished commits when the remote default branch is available."""
+    base = subprocess.run(
+        ["git", "merge-base", "origin/HEAD", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if base.returncode == 0:
+        commit = base.stdout.strip()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if commit and commit != head:
+            return f"{commit}..HEAD"
+    # A published default-branch checkout has no unpublished range. Check its tip so a
+    # push still cannot introduce a private author identity.
+    return "HEAD"
 
 
 def sensitive_identities(log: str) -> list[str]:

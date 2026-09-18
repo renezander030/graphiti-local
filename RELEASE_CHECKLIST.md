@@ -13,6 +13,11 @@
       running server serves what landed
 - [ ] `kg export` then `kg-ingest SNAPSHOT --restore --apply` into an empty database
       reproduces the facts
+- [ ] Tampering with one byte of a v2 export makes restore refuse it before opening a writer
+- [ ] `kg-ingest INPUT --review-output SNAPSHOT` leaves the configured graph unchanged,
+      and promoting the reviewed snapshot reproduces its exact facts
+- [ ] Two simultaneous Ladybug writers serialize or the second exits with the named timeout
+- [ ] Each streamable-HTTP token can read only its granted groups during token rotation
 - [ ] FalkorDB smoke test passes when a test endpoint is available
 - [ ] `python scripts/release_audit.py .` reports no findings
 - [ ] `CHANGELOG.md` records every breaking change with its migration

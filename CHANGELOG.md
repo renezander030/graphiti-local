@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.4.0
+
+This release makes the review boundary apply to model extraction itself, makes current
+facts the safe retrieval default, and hardens the local and HTTP deployment paths.
+
+### Breaking
+
+- `kg ask` and `search_memory_facts` now suppress facts whose `invalid_at` timestamp
+  has passed. Use `kg ask --history` or `include_invalidated: true` for an intentional
+  historical query.
+- Version 2 exports are canonical, atomic, and carry a record count and SHA-256 digest.
+  Restore verifies them before opening a writer. Version 1 snapshots remain readable.
+- A Ladybug HTTP deployment cannot configure a token for only some groups. Ladybug is
+  one embedded graph and cannot enforce that boundary; use a full-graph token or a
+  server backend when per-group isolation is required.
+
+### Added
+
+- `kg-ingest INPUT --review-output SNAPSHOT` extracts into a disposable Ladybug graph
+  and exports the exact resolved nodes, edges, and episodes for review. The configured
+  production graph is never opened. The command prints the restore invocation that
+  promotes the reviewed snapshot without running extraction again.
+- Streamable HTTP accepts named `server.auth.tokens`, each bound to an enforced group
+  list. Multiple tokens may overlap during rotation. The existing `auth.token` and
+  `auth.groups` form remains supported.
+- Fact retrieval overfetches the configured candidate multiple, applies the selected
+  cross encoder after RRF, preserves separate UUIDs when facts have identical text,
+  filters on the final score, and returns the score and ranker with each result.
+- `llm.api_mode` explicitly selects `responses`, `chat`, or endpoint-based `auto` mode.
+  `llm.max_tokens` is enforced as a hard ceiling even when an extraction prompt asks
+  the upstream client for a larger output.
+- Every Ladybug write path shares a cross-process lock with a configurable timeout,
+  including ingest, workspace drain, restore, setup, and review staging.
+- `kg-demo` answers against a packaged synthetic graph in one command, without a model
+  server or database setup. `kg ask --keyword` and `kg nodes --keyword` provide the
+  same model-free retrieval path for an existing graph.
+- A Docker image and MCP discovery container workflow validate the packaged server and
+  its six-tool read-only surface.
+
+### Fixed
+
+- FalkorDB search removes only a reserved standalone underscore token. Multi-label node
+  searches run one compatible query per label and merge UUIDs, avoiding invalid
+  RediSearch label expressions while preserving identifiers such as `foo_bar`.
+- Export now fails closed and names the record kind when a backend cannot collect it,
+  instead of producing a plausible partial snapshot.
+- Extraction and restore failures include the operation and exception type, including
+  a useful fallback for exceptions with an empty message.
+- The release audit checks unpublished commits against the fetched default branch, so
+  historical public metadata does not make every later release fail while new private
+  author identities remain blocked.
+- The release's CLI and demo changes pass the configured Ruff gate.
+
 ## 0.3.0
 
 0.2.x could run unattended, but not on the fully local profile: on Ladybug every search

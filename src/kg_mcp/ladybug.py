@@ -222,6 +222,7 @@ def setup_main() -> None:
     )
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--lock-timeout", type=float, default=30.0)
     args = parser.parse_args()
     target = args.database.expanduser().resolve()
     if not args.apply:
@@ -232,10 +233,15 @@ def setup_main() -> None:
         print("dry run only; add --apply in a trusted network-enabled environment")
         return
 
-    setup_database(target)
+    setup_database(target, lock_timeout=args.lock_timeout)
 
 
-def setup_database(target: Path, *, quiet: bool = False) -> list[str]:
+def setup_database(
+    target: Path,
+    *,
+    quiet: bool = False,
+    lock_timeout: float = 30.0,
+) -> list[str]:
     """Install the search extensions, create the schema and the full-text indexes.
 
     Split out of :func:`setup_main` so callers that already know the path, such as the
@@ -249,17 +255,22 @@ def setup_database(target: Path, *, quiet: bool = False) -> list[str]:
     ladybug = _alias_kuzu()
     from graphiti_core.driver.kuzu_driver import SCHEMA_QUERIES
 
+    from kg_mcp.write_lock import ladybug_path_lock
+
     target.parent.mkdir(parents=True, exist_ok=True)
-    database = ladybug.Database(str(target))
-    connection = ladybug.Connection(database)
-    for extension in EXTENSIONS:
-        connection.execute(f"INSTALL {extension}")
-        connection.execute(f"LOAD EXTENSION {extension}")
-        say(f"{extension}: installed and loaded")
-    connection.execute(SCHEMA_QUERIES)
-    created = ensure_indexes(connection)
-    say("schema: ready")
-    say(f"full-text indexes created: {', '.join(created) or 'none (already present)'}")
-    connection.close()
-    database.close()
+    with ladybug_path_lock(target, lock_timeout):
+        database = ladybug.Database(str(target))
+        connection = ladybug.Connection(database)
+        try:
+            for extension in EXTENSIONS:
+                connection.execute(f"INSTALL {extension}")
+                connection.execute(f"LOAD EXTENSION {extension}")
+                say(f"{extension}: installed and loaded")
+            connection.execute(SCHEMA_QUERIES)
+            created = ensure_indexes(connection)
+            say("schema: ready")
+            say(f"full-text indexes created: {', '.join(created) or 'none (already present)'}")
+        finally:
+            connection.close()
+            database.close()
     return created

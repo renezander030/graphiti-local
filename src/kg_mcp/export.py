@@ -8,12 +8,15 @@ vector written back under a different embedding model would be silently wrong.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 EMBEDDING_FIELDS = {"name_embedding", "fact_embedding"}
 
 
@@ -44,12 +47,41 @@ async def _collect(driver: Any, groups: list[str]) -> list[dict[str, Any]]:
     for model, kind in kinds:
         try:
             records = await model.get_by_group_ids(driver, groups)
-        except Exception:
-            # A backend that cannot answer for this kind must not abort the whole export;
-            # the summary reports what was captured so a partial snapshot is visible.
-            continue
+        except Exception as exc:
+            raise RuntimeError(f"snapshot export could not collect {kind}: {exc}") from exc
         collected.extend(_serialize(record, kind) for record in records or [])
     return collected
+
+
+def _json_line(value: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+
+
+def _atomic_snapshot(
+    destination: Path, header: dict[str, Any], records: list[dict[str, Any]]
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(_json_line(header))
+            for record in records:
+                handle.write(_json_line(record))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 async def export_graph(
@@ -79,19 +111,19 @@ async def export_graph(
     else:
         records = await _collect(graph.driver, groups)
 
+    record_bytes = [_json_line(record) for record in records]
+    digest = hashlib.sha256(b"".join(record_bytes)).hexdigest()
     header = {
         "kind": "export",
         "format_version": FORMAT_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider,
         "groups": groups,
+        "record_count": len(records),
+        "sha256": digest,
         "embeddings": "omitted; derived from the text under the embedder in use",
     }
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(header, ensure_ascii=False) + "\n")
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    _atomic_snapshot(destination, header, records)
 
     counts: dict[str, int] = {}
     for record in records:
@@ -104,4 +136,6 @@ async def export_graph(
         "edges": counts.get("entity_edge", 0) + counts.get("episodic_edge", 0),
         "by_kind": counts,
         "format_version": FORMAT_VERSION,
+        "sha256": digest,
+        "record_count": len(records),
     }

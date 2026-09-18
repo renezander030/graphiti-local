@@ -13,6 +13,15 @@ def _is_official_openai(url: str) -> bool:
     return url.rstrip("/") in {"https://api.openai.com", "https://api.openai.com/v1"}
 
 
+def uses_responses_api(settings: Settings) -> bool:
+    """Resolve the configured OpenAI API family without guessing when told explicitly."""
+    if settings.llm.api_mode == "responses":
+        return True
+    if settings.llm.api_mode == "chat":
+        return False
+    return _is_official_openai(settings.llm.api_url)
+
+
 async def bounded(awaitable: Any, seconds: float, what: str) -> Any:
     """Bound one graph call so a hung backend fails loudly instead of blocking forever."""
     try:
@@ -55,12 +64,40 @@ def build_reranker(settings: Settings):
     return GeminiRerankerClient(config=config)
 
 
-def build_graphiti(settings: Settings, *, read_only: bool):
-    os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
-    os.environ.setdefault("EMBEDDING_DIM", str(settings.embedder.dimensions))
+def cap_llm_tokens(llm: Any, maximum: int) -> Any:
+    """Enforce one output ceiling even when an upstream prompt asks for more."""
+    original = llm.generate_response
 
-    from graphiti_core import Graphiti
-    from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+    async def generate_response(
+        messages,
+        response_model=None,
+        max_tokens=None,
+        model_size=None,
+        group_id=None,
+        prompt_name=None,
+        *,
+        attribute_extraction=False,
+    ):
+        capped = maximum if max_tokens is None else min(max_tokens, maximum)
+        kwargs = {
+            "response_model": response_model,
+            "max_tokens": capped,
+            "group_id": group_id,
+            "prompt_name": prompt_name,
+            "attribute_extraction": attribute_extraction,
+        }
+        if model_size is not None:
+            kwargs["model_size"] = model_size
+        return await original(messages, **kwargs)
+
+    llm.generate_response = generate_response
+    llm.max_tokens = maximum
+    llm.configured_max_tokens = maximum
+    return llm
+
+
+def build_llm(settings: Settings):
+    """Build the extraction client selected by ``llm.api_mode``."""
     from graphiti_core.llm_client.config import LLMConfig
     from graphiti_core.llm_client.openai_client import OpenAIClient
     from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
@@ -73,14 +110,25 @@ def build_graphiti(settings: Settings, *, read_only: bool):
         temperature=settings.llm.temperature,  # type: ignore[arg-type]
         max_tokens=settings.llm.max_tokens,
     )
-    if _is_official_openai(settings.llm.api_url):
-        llm = OpenAIClient(config=llm_config)
+    if uses_responses_api(settings):
+        llm = OpenAIClient(config=llm_config, max_tokens=settings.llm.max_tokens)
     else:
         llm = OpenAIGenericClient(
             config=llm_config,
             max_tokens=settings.llm.max_tokens,
             structured_output_mode=settings.llm.structured_output_mode,
         )
+    return cap_llm_tokens(llm, settings.llm.max_tokens)
+
+
+def build_graphiti(settings: Settings, *, read_only: bool):
+    os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
+    os.environ.setdefault("EMBEDDING_DIM", str(settings.embedder.dimensions))
+
+    from graphiti_core import Graphiti
+    from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+
+    llm = build_llm(settings)
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
             api_key=settings.embedder.api_key or None,
@@ -101,6 +149,7 @@ def build_graphiti(settings: Settings, *, read_only: bool):
 
         driver_class = FalkorDriver
         if read_only:
+
             class ReadOnlyFalkorDriver(FalkorDriver):
                 async def build_indices_and_constraints(self, delete_existing: bool = False):
                     del delete_existing

@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kg_mcp.config import Settings, allowed_groups, load_config
+from kg_mcp.config import Settings, TokenGrant, allowed_groups, load_config
 from kg_mcp.runtime import bounded
 
 logger = logging.getLogger(__name__)
+_request_group_scope: ContextVar[frozenset[str] | None] = ContextVar(
+    "request_group_scope", default=None
+)
 
 
 def _iso(value: Any) -> str | None:
@@ -40,8 +45,8 @@ def _node(node: Any) -> dict[str, Any]:
     }
 
 
-def _edge(edge: Any) -> dict[str, Any]:
-    return {
+def _edge(edge: Any, score: float | None = None) -> dict[str, Any]:
+    payload = {
         "uuid": edge.uuid,
         "name": edge.name,
         "fact": edge.fact,
@@ -51,7 +56,31 @@ def _edge(edge: Any) -> dict[str, Any]:
         "created_at": _iso(edge.created_at),
         "valid_at": _iso(edge.valid_at),
         "invalid_at": _iso(edge.invalid_at),
+        "expired_at": _iso(getattr(edge, "expired_at", None)),
     }
+    if score is not None:
+        payload["score"] = score
+    return payload
+
+
+def authorized_groups(requested: str | list[str] | None, settings: Settings) -> list[str] | None:
+    """Apply both the configured graph allow-list and the authenticated token scope."""
+    token_scope = _request_group_scope.get()
+    requested_groups = [requested] if isinstance(requested, str) else requested
+    if not requested_groups:
+        requested_groups = (
+            [group for group in settings.graph.groups if group in token_scope]
+            if token_scope is not None
+            else settings.graph.groups
+        )
+    allowed_groups(requested_groups, settings)
+    if token_scope is not None:
+        forbidden = sorted(set(requested_groups) - token_scope)
+        if forbidden:
+            raise ValueError(f"group is not granted by the bearer token: {forbidden[0]}")
+    if settings.database.provider == "ladybug":
+        return None
+    return requested_groups
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -156,7 +185,10 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             return {"error": "max_nodes must be a positive integer"}
         try:
             graph, active, timeout = runtime()
-            groups = allowed_groups(group_ids, active)
+            groups = authorized_groups(group_ids, active)
+            from kg_mcp.retrieval import compatible_query
+
+            safe_query = compatible_query(query, active)
             from graphiti_core.search.search_config_recipes import (
                 NODE_HYBRID_SEARCH_NODE_DISTANCE,
                 NODE_HYBRID_SEARCH_RRF,
@@ -164,22 +196,45 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             from graphiti_core.search.search_filters import SearchFilters
 
             recipe = (
-                NODE_HYBRID_SEARCH_NODE_DISTANCE
-                if center_node_uuid
-                else NODE_HYBRID_SEARCH_RRF
+                NODE_HYBRID_SEARCH_NODE_DISTANCE if center_node_uuid else NODE_HYBRID_SEARCH_RRF
             )
-            result = await bounded(
-                graph.search_(
-                    query=query,
-                    config=recipe,
-                    group_ids=groups,
-                    center_node_uuid=center_node_uuid,
-                    search_filter=SearchFilters(node_labels=entity_types),
-                ),
-                timeout,
-                "search_nodes",
-            )
-            nodes = [_node(node) for node in (result.nodes or [])[:max_nodes]]
+
+            async def find_nodes() -> list[Any]:
+                labels = entity_types or []
+                if active.database.provider != "falkordb" or len(labels) < 2:
+                    result = await graph.search_(
+                        query=safe_query,
+                        config=recipe,
+                        group_ids=groups,
+                        center_node_uuid=center_node_uuid,
+                        search_filter=SearchFilters(node_labels=labels or None),
+                    )
+                    return list(result.nodes or [])
+                # RediSearch cannot parse the combined ``n:A|B`` label expression that
+                # graphiti-core emits. Query labels independently, then merge by UUID.
+                results = await asyncio.gather(
+                    *(
+                        graph.search_(
+                            query=safe_query,
+                            config=recipe,
+                            group_ids=groups,
+                            center_node_uuid=center_node_uuid,
+                            search_filter=SearchFilters(node_labels=[label]),
+                        )
+                        for label in labels
+                    )
+                )
+                seen: set[str] = set()
+                merged = []
+                for result in results:
+                    for node in result.nodes or []:
+                        if node.uuid not in seen:
+                            seen.add(node.uuid)
+                            merged.append(node)
+                return merged
+
+            found = await bounded(find_nodes(), timeout, "search_nodes")
+            nodes = [_node(node) for node in found[:max_nodes]]
             return {
                 "message": "Nodes retrieved successfully" if nodes else "No relevant nodes found",
                 "nodes": nodes,
@@ -199,13 +254,23 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         valid_at_before: str | None = None,
         invalid_at_after: str | None = None,
         invalid_at_before: str | None = None,
+        include_invalidated: bool = False,
     ) -> dict[str, Any]:
         """Search temporal facts with optional type, time, group, and center filters."""
         if max_facts < 1:
             return {"error": "max_facts must be a positive integer"}
         try:
             graph, active, timeout = runtime()
-            groups = allowed_groups(group_ids, active)
+            groups = authorized_groups(group_ids, active)
+            from kg_mcp.retrieval import (
+                candidate_limit,
+                compatible_query,
+                current_edges,
+                rerank_edges,
+            )
+
+            safe_query = compatible_query(query, active)
+            candidates = candidate_limit(max_facts, active)
             from graphiti_core.search.search_filters import SearchFilters
 
             search_filter = SearchFilters(
@@ -213,21 +278,28 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                 valid_at=_date_range(valid_at_after, valid_at_before),
                 invalid_at=_date_range(invalid_at_after, invalid_at_before),
             )
-            edges = await bounded(
-                graph.search(
-                    query=query,
+
+            async def find_facts() -> tuple[list[tuple[Any, float]], int]:
+                edges = await graph.search(
+                    query=safe_query,
                     group_ids=groups,
-                    num_results=max_facts,
+                    num_results=candidates,
                     center_node_uuid=center_node_uuid,
                     search_filter=search_filter,
-                ),
-                timeout,
-                "search_memory_facts",
-            )
-            facts = [_edge(edge) for edge in edges]
+                )
+                current, suppressed = current_edges(
+                    list(edges), include_invalidated=include_invalidated
+                )
+                ranked = await rerank_edges(graph, safe_query, current, active, max_facts)
+                return ranked, suppressed
+
+            ranked, suppressed = await bounded(find_facts(), timeout, "search_memory_facts")
+            facts = [_edge(edge, score) for edge, score in ranked]
             return {
                 "message": "Facts retrieved successfully" if facts else "No relevant facts found",
                 "facts": facts,
+                "suppressed_invalidated": suppressed,
+                "ranker": active.reranker.provider,
             }
         except Exception as exc:
             logger.exception("fact search failed")
@@ -238,10 +310,11 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         """Get one fact edge by UUID from an allow-listed graph."""
         try:
             graph, active, timeout = runtime()
+            groups = authorized_groups(None, active)
             from graphiti_core.edges import EntityEdge
 
             if active.database.provider == "falkordb":
-                for group in active.graph.groups:
+                for group in groups or active.graph.groups:
                     try:
                         driver = graph.driver.clone(database=group)
                         edge = await bounded(
@@ -256,6 +329,9 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             edge = await bounded(
                 EntityEdge.get_by_uuid(graph.driver, uuid), timeout, "get_entity_edge"
             )
+            scope = _request_group_scope.get()
+            if scope is not None and edge.group_id and edge.group_id not in scope:
+                raise LookupError(f"edge not found: {uuid}")
             return _edge(edge)
         except Exception as exc:
             logger.exception("edge lookup failed")
@@ -271,7 +347,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             return {"error": "max_episodes must be a positive integer"}
         try:
             graph, active, timeout = runtime()
-            groups = allowed_groups(group_ids, active)
+            groups = authorized_groups(group_ids, active)
             episodes = await bounded(
                 graph.retrieve_episodes(
                     reference_time=datetime.now(timezone.utc),
@@ -312,24 +388,41 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             return {"error": "episode_uuids must contain at least one UUID"}
         try:
             graph, active, timeout = runtime()
-            groups = allowed_groups(group_id, active)
-            driver = graph.driver
-            if active.database.provider == "falkordb":
-                driver = graph.driver.clone(database=(groups or active.graph.groups)[0])
+            groups = authorized_groups(group_id, active)
             from graphiti_core.edges import EntityEdge
             from graphiti_core.nodes import EpisodicNode
             from graphiti_core.search.search_utils import get_mentioned_nodes
 
-            async def trace() -> tuple[list[Any], list[Any]]:
+            async def trace(driver: Any) -> tuple[list[Any], list[Any]]:
                 episodes = await EpisodicNode.get_by_uuids(driver, episode_uuids)
+                if active.database.provider != "ladybug":
+                    visible = set(groups or active.graph.groups)
+                    episodes = [
+                        episode for episode in episodes if episode.group_id in visible
+                    ]
                 edges = [
                     edge
                     for episode in episodes
                     for edge in await EntityEdge.get_by_uuids(driver, episode.entity_edges)
                 ]
-                return await get_mentioned_nodes(driver, episodes), edges
+                nodes = await get_mentioned_nodes(driver, episodes)
+                if active.database.provider != "ladybug":
+                    nodes = [node for node in nodes if node.group_id in visible]
+                    edges = [edge for edge in edges if edge.group_id in visible]
+                return nodes, edges
 
-            nodes, edges = await bounded(trace(), timeout, "get_episode_entities")
+            drivers = [graph.driver]
+            if active.database.provider == "falkordb":
+                drivers = [
+                    graph.driver.clone(database=group) for group in (groups or active.graph.groups)
+                ]
+            traces = await bounded(
+                asyncio.gather(*(trace(driver) for driver in drivers)),
+                timeout,
+                "get_episode_entities",
+            )
+            nodes = list({node.uuid: node for result in traces for node in result[0]}.values())
+            edges = list({edge.uuid: edge for result in traces for edge in result[1]}.values())
             return {
                 "message": f"Retrieved provenance for {len(episode_uuids)} episode(s)",
                 "nodes": [_node(node) for node in nodes],
@@ -340,18 +433,23 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             return {"error": f"Error getting episode entities: {exc}"}
 
     @mcp.tool()
-    async def get_status() -> dict[str, str]:
+    async def get_status() -> dict[str, Any]:
         """Check the server and its configured database connection."""
         try:
             graph, active, timeout = runtime()
+            groups = authorized_groups(None, active)
+            driver = graph.driver
+            if active.database.provider == "falkordb":
+                driver = graph.driver.clone(database=(groups or active.graph.groups)[0])
             await bounded(
-                graph.driver.execute_query("MATCH (n) RETURN count(n) AS count"),
+                driver.execute_query("MATCH (n) RETURN count(n) AS count"),
                 timeout,
                 "get_status",
             )
             return {
                 "status": "ok",
                 "message": f"Graphiti Local is connected to {active.database.provider}",
+                "groups": groups or active.graph.groups,
             }
         except Exception as exc:
             logger.exception("status check failed")
@@ -372,16 +470,33 @@ class BearerTokenMiddleware:
     does not have. Wrapping the ASGI app keeps the configuration to one secret.
     """
 
-    def __init__(self, app: Any, token: str) -> None:
+    def __init__(
+        self,
+        app: Any,
+        grants: list[TokenGrant] | str,
+        all_groups: list[str] | None = None,
+    ) -> None:
         self.app = app
-        self.expected = f"Bearer {token}".encode()
+        if isinstance(grants, str):
+            grants = [TokenGrant(token=grants)]
+        all_groups = all_groups or []
+        self.grants = [
+            (f"Bearer {grant.token}".encode(), frozenset(grant.groups or all_groups))
+            for grant in grants
+        ]
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
         headers = dict(scope.get("headers") or [])
-        if not hmac.compare_digest(headers.get(b"authorization", b""), self.expected):
+        supplied = headers.get(b"authorization", b"")
+        matched: frozenset[str] | None = None
+        # Compare every configured token so the matching token's position is not exposed.
+        for expected, groups in self.grants:
+            if hmac.compare_digest(supplied, expected):
+                matched = groups
+        if matched is None:
             await send(
                 {
                     "type": "http.response.start",
@@ -394,7 +509,11 @@ class BearerTokenMiddleware:
             )
             await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
             return
-        await self.app(scope, receive, send)
+        marker = _request_group_scope.set(matched)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _request_group_scope.reset(marker)
 
 
 def serve(settings: Settings) -> None:
@@ -406,7 +525,11 @@ def serve(settings: Settings) -> None:
 
     # Config validation already refuses this transport without a token, so the gate
     # cannot be skipped by omitting configuration.
-    app = BearerTokenMiddleware(server.streamable_http_app(), settings.server.auth.token)
+    app = BearerTokenMiddleware(
+        server.streamable_http_app(),
+        settings.server.auth.grants(),
+        settings.graph.groups,
+    )
     uvicorn.run(app, host=settings.server.host, port=settings.server.port)
 
 

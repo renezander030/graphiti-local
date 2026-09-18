@@ -51,6 +51,11 @@ The synthetic example returns **DuckDB**. Follow the [complete walkthrough](docs
 to propose PostgreSQL, review and apply that update, and retrieve it from an MCP client.
 Model extraction can be wrong; inspect the returned facts and validity timestamps.
 
+To review extraction before it touches the configured graph, run
+`kg-ingest INPUT --review-output review.jsonl`, inspect the snapshot, then use the
+printed restore command to promote those exact records. Searches return current facts
+by default; `kg ask --history` is the explicit historical view.
+
 ## Is it a fit?
 
 Use it for local agent memory with explicit human review. Skip it if you need
