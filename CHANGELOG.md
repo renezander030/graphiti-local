@@ -38,6 +38,8 @@ facts the safe retrieval default, and hardens the local and HTTP deployment path
   same model-free retrieval path for an existing graph.
 - A Docker image and MCP discovery container workflow validate the packaged server and
   its six-tool read-only surface.
+- `server.json` describes the PyPI stdio package for publication in the official MCP
+  Registry.
 
 ### Fixed
 

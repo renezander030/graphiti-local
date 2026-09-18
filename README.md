@@ -73,3 +73,5 @@ Maintained by [René Zander](https://renezander.com/projects/graphiti-local/), w
 
 Independent community project built on [Graphiti](https://github.com/getzep/graphiti),
 not affiliated with or endorsed by Zep. [Apache-2.0](LICENSE).
+
+<!-- mcp-name: io.github.renezander030/graphiti-local -->
