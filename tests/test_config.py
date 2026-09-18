@@ -42,4 +42,3 @@ def test_ladybug_uses_embedded_scope():
     assert allowed_groups("local", settings) is None
     with pytest.raises(ValueError, match="not allowed"):
         allowed_groups("other", settings)
-

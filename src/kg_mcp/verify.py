@@ -51,6 +51,7 @@ async def check_tool_surface() -> list[dict[str, str]]:
 
 async def check_retrieval(query: str) -> list[dict[str, Any]]:
     from kg_mcp.config import allowed_groups, load_config
+    from kg_mcp.retrieval import current_edges
     from kg_mcp.runtime import bounded, build_graphiti
 
     settings = load_config()
@@ -63,9 +64,10 @@ async def check_retrieval(query: str) -> list[dict[str, Any]]:
     try:
         groups = allowed_groups(None, settings)
         try:
-            facts = await bounded(
+            candidates = await bounded(
                 graph.search(query, group_ids=groups, num_results=10), timeout, "search"
             )
+            facts, _ = current_edges(list(candidates), include_invalidated=False)
         except Exception as exc:
             return [_check("retrieval", FAIL, f"search raised: {exc}")]
         if facts:
@@ -100,11 +102,12 @@ async def check_retrieval(query: str) -> list[dict[str, Any]]:
                 )
             else:
                 sample = invalidated[0]
-                current = await bounded(
+                candidates = await bounded(
                     graph.search(sample.fact, group_ids=groups, num_results=10),
                     timeout,
                     "search",
                 )
+                current, _ = current_edges(list(candidates), include_invalidated=False)
                 leaked = any(item.uuid == sample.uuid for item in current)
                 results.append(
                     _check(

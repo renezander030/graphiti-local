@@ -209,9 +209,14 @@ def check_transport(settings: Settings) -> dict[str, str]:
     server = settings.server
     if server.transport == "stdio":
         return _check("transport", OK, "stdio (no network exposure)")
-    if server.host not in {"127.0.0.1", "::1", "localhost"} and not server.auth.token:
+    grants = server.auth.grants()
+    if server.host not in {"127.0.0.1", "::1", "localhost"} and not grants:
         return _check("transport", FAIL, f"streamable-http on {server.host} without a token")
-    scope = ", ".join(server.auth.groups) if server.auth.groups else "all configured groups"
+    scopes = [
+        f"{grant.name or f'token {index + 1}'}: "
+        f"{', '.join(grant.groups) if grant.groups else 'all configured groups'}"
+        for index, grant in enumerate(grants)
+    ]
     hosts = (
         f"; Host allow-list: {', '.join(server.allowed_hosts)}"
         if server.allowed_hosts
@@ -220,7 +225,8 @@ def check_transport(settings: Settings) -> dict[str, str]:
     return _check(
         "transport",
         OK,
-        f"streamable-http on {server.host}:{server.port}; token grants {scope}{hosts}",
+        f"streamable-http on {server.host}:{server.port}; "
+        f"{len(grants)} token grant(s) ({'; '.join(scopes)}){hosts}",
     )
 
 

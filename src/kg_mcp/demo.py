@@ -20,8 +20,7 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -149,10 +148,15 @@ async def _ask(question: str, limit: int) -> list[dict[str, Any]]:
     settings = load_config()
     graph = build_graphiti(settings, read_only=True)
     try:
-        results = await graph.search_(question, config=_keyword_edge_config(limit), group_ids=[GROUP])
+        results = await graph.search_(
+            question, config=_keyword_edge_config(limit), group_ids=[GROUP]
+        )
+        from kg_mcp.retrieval import current_edges
+
+        edges, _ = current_edges(list(results.edges), include_invalidated=False)
         return [
             {"fact": edge.fact, "valid_at": edge.valid_at.isoformat() if edge.valid_at else None}
-            for edge in results.edges[:limit]
+            for edge in edges[:limit]
         ]
     finally:
         await graph.close()
@@ -171,9 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     database = _ensure_graph(home)
 
     config = home / "demo.yaml"
-    config.write_text(
-        _CONFIG.format(workspace=home, database=database, unreachable=_UNREACHABLE)
-    )
+    config.write_text(_CONFIG.format(workspace=home, database=database, unreachable=_UNREACHABLE))
     os.environ["GRAPHITI_LOCAL_CONFIG"] = str(config)
     os.environ.setdefault("KG_LADYBUG_PATH", str(database))
     os.environ.setdefault("KG_WORKSPACE_DIR", str(home))

@@ -11,13 +11,15 @@ import argparse
 import asyncio
 import hashlib
 import json
+import shlex
 import signal
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kg_mcp.config import allowed_groups, load_config
+from kg_mcp.config import Settings, allowed_groups, load_config
 
 LEDGER = "ingest-ledger.jsonl"
 
@@ -149,8 +151,10 @@ async def ingest_records(
     resume: bool = True,
     fail_fast: bool = False,
     ledger: bool = True,
+    settings: Settings | None = None,
+    track_fingerprint: bool = True,
 ) -> dict[str, Any]:
-    settings = load_config()
+    settings = settings or load_config()
     for record in records:
         domain = str(record.get("domain") or settings.graph.groups[0])
         allowed_groups(domain, settings)
@@ -182,43 +186,56 @@ async def ingest_records(
 
     # Vectors from two embedders in one graph rank wrongly and say nothing; refuse before
     # the first write rather than after.
-    drift = fingerprint.drift(settings)
-    if drift:
-        raise ValueError(drift)
+    if track_fingerprint:
+        drift = fingerprint.drift(settings)
+        if drift:
+            raise ValueError(drift)
 
-    graph = build_graphiti(settings, read_only=False)
+    from kg_mcp.write_lock import graph_writer_lock
+
     ingested, failures, interrupted = 0, [], False
-    try:
-        with _stop_on_signal() as stop:
-            await graph.build_indices_and_constraints()
-            for record, domain, key in planned:
-                if stop["requested"]:
-                    interrupted = True
-                    break
-                try:
-                    await graph.add_episode(
-                        name=str(record["name"]).strip(),
-                        episode_body=str(record["body"]).strip(),
-                        source=EpisodeType.text,
-                        source_description=str(
-                            record.get("provenance") or "Graphiti Local JSONL import"
-                        ),
-                        reference_time=_reference_time(record.get("valid_at")),
-                        group_id=None if settings.database.provider == "ladybug" else domain,
-                    )
-                except Exception as exc:  # one bad episode must not cost the batch
-                    failures.append({"name": record["name"], "domain": domain, "error": str(exc)})
-                    if fail_fast:
+    with graph_writer_lock(settings):
+        graph = build_graphiti(settings, read_only=False)
+        try:
+            with _stop_on_signal() as stop:
+                await graph.build_indices_and_constraints()
+                for record, domain, key in planned:
+                    if stop["requested"]:
+                        interrupted = True
                         break
-                    continue
-                if ledger:
-                    _record_completed(key, domain, str(record["name"]).strip())
-                ingested += 1
-        if ingested:
-            fingerprint.record(settings)
-    finally:
-        # Always close: an embedded backend left with a partial write may refuse to reopen.
-        await graph.close()
+                    try:
+                        await graph.add_episode(
+                            name=str(record["name"]).strip(),
+                            episode_body=str(record["body"]).strip(),
+                            source=EpisodeType.text,
+                            source_description=str(
+                                record.get("provenance") or "Graphiti Local JSONL import"
+                            ),
+                            reference_time=_reference_time(record.get("valid_at")),
+                            group_id=None if settings.database.provider == "ladybug" else domain,
+                        )
+                    except Exception as exc:  # one bad episode must not cost the batch
+                        detail = str(exc).strip() or f"{type(exc).__name__} (no message)"
+                        failures.append(
+                            {
+                                "name": record["name"],
+                                "domain": domain,
+                                "operation": "extract episode",
+                                "error_type": type(exc).__name__,
+                                "error": detail,
+                            }
+                        )
+                        if fail_fast:
+                            break
+                        continue
+                    if ledger:
+                        _record_completed(key, domain, str(record["name"]).strip())
+                    ingested += 1
+            if ingested and track_fingerprint:
+                fingerprint.record(settings)
+        finally:
+            # Always close: an embedded backend left with a partial write may refuse to reopen.
+            await graph.close()
     return {
         "applied": True,
         "ingested": ingested,
@@ -226,6 +243,84 @@ async def ingest_records(
         "failed": failures,
         "interrupted": interrupted,
         "planned": [],
+    }
+
+
+async def stage_extraction(
+    records: list[dict[str, Any]],
+    output: Path,
+    *,
+    fail_fast: bool = False,
+) -> dict[str, Any]:
+    """Extract into a disposable graph and export the resolved facts for review."""
+    settings = load_config()
+    domains = {str(record.get("domain") or settings.graph.groups[0]) for record in records}
+    for domain in domains:
+        allowed_groups(domain, settings)
+    if len(domains) != 1:
+        raise ValueError(
+            "--review-output accepts one domain per snapshot; split the input by domain"
+        )
+    domain = next(iter(domains))
+    destination = output.expanduser().resolve()
+
+    from kg_mcp.export import export_graph
+    from kg_mcp.ladybug import setup_database
+    from kg_mcp.runtime import build_graphiti
+
+    with tempfile.TemporaryDirectory(prefix="graphiti-local-review-") as directory:
+        root = Path(directory)
+        database_path = root / "review.ladybug"
+        stage_graph = settings.graph.model_copy(
+            update={"groups": [domain], "workspace_dir": str(root / "workspace")}
+        )
+        stage_database = settings.database.model_copy(
+            update={
+                "provider": "ladybug",
+                "ladybug": settings.database.ladybug.model_copy(
+                    update={"path": str(database_path)}
+                ),
+            }
+        )
+        stage_settings = settings.model_copy(
+            update={"graph": stage_graph, "database": stage_database}
+        )
+        setup_database(
+            database_path,
+            quiet=True,
+            lock_timeout=stage_graph.writer_lock_timeout_seconds,
+        )
+        extraction = await ingest_records(
+            records,
+            apply=True,
+            resume=False,
+            fail_fast=fail_fast,
+            ledger=False,
+            settings=stage_settings,
+            track_fingerprint=False,
+        )
+        graph = build_graphiti(stage_settings, read_only=True)
+        try:
+            snapshot = await export_graph(
+                graph,
+                stage_settings,
+                [domain],
+                output=str(destination),
+            )
+        finally:
+            await graph.close()
+
+    return {
+        "staged": True,
+        "production_graph_changed": False,
+        "domain": domain,
+        "extracted": extraction["ingested"],
+        "failed": extraction["failed"],
+        "review_snapshot": snapshot,
+        "promote": (
+            f"kg-ingest {shlex.quote(str(destination))} --restore "
+            f"--group {shlex.quote(domain)} --apply"
+        ),
     }
 
 
@@ -257,8 +352,53 @@ def main() -> None:
         default=None,
         help="with --restore: the group every restored record is written to",
     )
+    parser.add_argument(
+        "--review-output",
+        type=Path,
+        help=(
+            "extract into a disposable graph and write a reviewable snapshot; "
+            "the configured production graph is not changed"
+        ),
+    )
     args = parser.parse_args()
     as_json = not args.human
+    if args.review_output:
+        if args.apply or args.restore:
+            fail(
+                "--review-output cannot be combined with --apply or --restore",
+                code=2,
+                as_json=as_json,
+            )
+            return
+        try:
+            records = read_records(args.input, skip_invalid=args.skip_invalid)
+            result = asyncio.run(
+                stage_extraction(records, args.review_output, fail_fast=args.fail_fast)
+            )
+        except ValueError as exc:
+            fail(str(exc), code=2, as_json=as_json)
+            return
+        except (FileNotFoundError, RuntimeError) as exc:
+            fail(str(exc), as_json=as_json)
+            return
+
+        def review_human() -> list[str]:
+            snapshot = result["review_snapshot"]
+            lines = [
+                f"staged {result['extracted']} episode(s) without changing the production graph",
+                f"review {snapshot['record_count']} graph record(s) in {snapshot['output']}",
+                f"promote unchanged: {result['promote']}",
+            ]
+            lines.extend(
+                f"FAILED [{item['domain']}] {item['name']}: {item['error']}"
+                for item in result["failed"]
+            )
+            return lines
+
+        emit(result, human=review_human, as_json=as_json)
+        if result["failed"]:
+            raise SystemExit(1)
+        return
     if args.restore:
         _restore_main(args, as_json=as_json)
         return

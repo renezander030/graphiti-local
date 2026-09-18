@@ -91,36 +91,67 @@ def _keyword_edge_config(limit: int):
     nothing running. Reciprocal rank fusion is kept because it orders a single result
     list unchanged and costs no extra call.
     """
-    from graphiti_core.search.search_config import EdgeReranker
-    from graphiti_core.search.search_config import EdgeSearchConfig
-    from graphiti_core.search.search_config import EdgeSearchMethod
-    from graphiti_core.search.search_config import SearchConfig
+    from graphiti_core.search.search_config import (
+        EdgeReranker,
+        EdgeSearchConfig,
+        EdgeSearchMethod,
+        SearchConfig,
+    )
 
     return SearchConfig(
-        edge_config=EdgeSearchConfig(search_methods=[EdgeSearchMethod.bm25], reranker=EdgeReranker.rrf),
+        edge_config=EdgeSearchConfig(
+            search_methods=[EdgeSearchMethod.bm25], reranker=EdgeReranker.rrf
+        ),
         limit=limit,
     )
 
 
 def _keyword_node_config(limit: int):
     """Node equivalent of :func:`_keyword_edge_config`."""
-    from graphiti_core.search.search_config import NodeReranker
-    from graphiti_core.search.search_config import NodeSearchConfig
-    from graphiti_core.search.search_config import NodeSearchMethod
-    from graphiti_core.search.search_config import SearchConfig
+    from graphiti_core.search.search_config import (
+        NodeReranker,
+        NodeSearchConfig,
+        NodeSearchMethod,
+        SearchConfig,
+    )
 
     return SearchConfig(
-        node_config=NodeSearchConfig(search_methods=[NodeSearchMethod.bm25], reranker=NodeReranker.rrf),
+        node_config=NodeSearchConfig(
+            search_methods=[NodeSearchMethod.bm25], reranker=NodeReranker.rrf
+        ),
         limit=limit,
     )
 
 
-async def _edge_search(graph: Any, args: argparse.Namespace, groups: list[str] | None):
-    """Return matching edges, keyword only when the caller asked for it."""
+async def _edge_search(
+    graph: Any,
+    args: argparse.Namespace,
+    groups: list[str] | None,
+    settings: Any,
+) -> tuple[list[tuple[Any, float]], int]:
+    """Return current, identity-safe reranked edges."""
+    from kg_mcp.retrieval import (
+        candidate_limit,
+        compatible_query,
+        current_edges,
+        rerank_edges,
+    )
+
+    query = compatible_query(args.query, settings)
+    candidates = candidate_limit(args.limit, settings)
     if not getattr(args, "keyword", False):
-        return await graph.search(args.query, group_ids=groups, num_results=args.limit)
-    results = await graph.search_(args.query, config=_keyword_edge_config(args.limit), group_ids=groups)
-    return results.edges[: args.limit]
+        edges = await graph.search(query, group_ids=groups, num_results=candidates)
+    else:
+        results = await graph.search_(
+            query,
+            config=_keyword_edge_config(candidates),
+            group_ids=groups,
+        )
+        edges = results.edges[:candidates]
+    current, suppressed = current_edges(
+        list(edges), include_invalidated=getattr(args, "history", False)
+    )
+    return await rerank_edges(graph, query, current, settings, args.limit), suppressed
 
 
 async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -132,8 +163,8 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
     try:
         if args.command == "ask":
             groups = allowed_groups(args.groups, settings)
-            results = await bounded(
-                _edge_search(graph, args, groups),
+            results, suppressed = await bounded(
+                _edge_search(graph, args, groups, settings),
                 timeout,
                 "ask",
             )
@@ -147,18 +178,28 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
                         "group_id": getattr(result, "group_id", None),
                         "valid_at": _iso(getattr(result, "valid_at", None)),
                         "invalid_at": _iso(getattr(result, "invalid_at", None)),
+                        "expired_at": _iso(getattr(result, "expired_at", None)),
+                        "score": score,
                     }
-                    for result in results
+                    for result, score in results
                 ],
+                "suppressed_invalidated": suppressed,
+                "ranker": settings.reranker.provider,
                 "pending": _pending_items(groups),
             }
         if args.command == "nodes":
             groups = allowed_groups(args.groups, settings)
+            from kg_mcp.retrieval import candidate_limit, compatible_query
+
+            candidate_limit(args.limit, settings)
+            query = compatible_query(args.query, settings)
             from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 
-            node_config = _keyword_node_config(args.limit) if args.keyword else NODE_HYBRID_SEARCH_RRF
+            node_config = (
+                _keyword_node_config(args.limit) if args.keyword else NODE_HYBRID_SEARCH_RRF
+            )
             result = await bounded(
-                graph.search_(args.query, config=node_config, group_ids=groups),
+                graph.search_(query, config=node_config, group_ids=groups),
                 timeout,
                 "nodes",
             )
@@ -221,9 +262,7 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
             groups = []
             for group in settings.graph.groups:
                 driver = (
-                    graph.driver.clone(database=group)
-                    if provider == "falkordb"
-                    else graph.driver
+                    graph.driver.clone(database=group) if provider == "falkordb" else graph.driver
                 )
                 rows, _, _ = await bounded(
                     driver.execute_query("MATCH (n) RETURN count(n) AS count"),
@@ -375,6 +414,12 @@ def parser() -> argparse.ArgumentParser:
                 "inference backend running, at the cost of missing paraphrases."
             ),
         )
+        if name == "ask":
+            command.add_argument(
+                "--history",
+                action="store_true",
+                help="include facts whose invalidation timestamp has passed",
+            )
     episodes = commands.add_parser("episodes", parents=[common])
     episodes.add_argument("groups", nargs="*")
     episodes.add_argument("--limit", type=int, default=10)

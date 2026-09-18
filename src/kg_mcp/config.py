@@ -15,6 +15,7 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:([^}]*))?\}")
 
 def _expand(value: Any) -> Any:
     if isinstance(value, str):
+
         def replace(match: re.Match[str]) -> str:
             return os.environ.get(match.group(1), match.group(3) or "")
 
@@ -47,11 +48,39 @@ def embedding_model_base(model: str) -> str:
     return model.split(":", 1)[0].strip()
 
 
+class TokenGrant(BaseModel):
+    """One bearer token and the graph groups it may read."""
+
+    token: str = Field(min_length=16)
+    groups: list[str] = Field(default_factory=list)
+    name: str = ""
+
+
 class AuthConfig(BaseModel):
-    """Bearer-token gate for the network transport. Ignored by stdio."""
+    """Bearer-token gates for the network transport. Ignored by stdio.
+
+    ``token`` and ``groups`` remain the compact single-token form. ``tokens`` supports
+    overlapping credentials so a token can be rotated without an outage.
+    """
 
     token: str = ""
     groups: list[str] = Field(default_factory=list)
+    tokens: list[TokenGrant] = Field(default_factory=list)
+
+    def grants(self) -> list[TokenGrant]:
+        grants = list(self.tokens)
+        if self.token:
+            grants.insert(0, TokenGrant(token=self.token, groups=self.groups, name="legacy"))
+        return grants
+
+    @model_validator(mode="after")
+    def validate_grants(self) -> AuthConfig:
+        if self.token and len(self.token) < 16:
+            raise ValueError("server.auth.token must be at least 16 characters")
+        tokens = [grant.token for grant in self.grants()]
+        if len(tokens) != len(set(tokens)):
+            raise ValueError("server.auth bearer tokens must be unique")
+        return self
 
 
 class ServerConfig(BaseModel):
@@ -68,13 +97,12 @@ class ServerConfig(BaseModel):
     def validate_network_exposure(self) -> ServerConfig:
         if self.transport != "streamable-http":
             return self
-        if not self.auth.token:
+        if not self.auth.grants():
             raise ValueError(
-                "server.transport 'streamable-http' requires server.auth.token; "
+                "server.transport 'streamable-http' requires server.auth.token or "
+                "server.auth.tokens; "
                 "an unauthenticated network transport exposes every configured group"
             )
-        if len(self.auth.token) < 16:
-            raise ValueError("server.auth.token must be at least 16 characters")
         return self
 
 
@@ -84,6 +112,9 @@ class GraphConfig(BaseModel):
     # Upper bound on one graph call. A backend that hangs must fail loudly rather than
     # leave an agent waiting on a tool call it reads as "no context".
     query_timeout_seconds: float = Field(default=30.0, gt=0)
+    # An embedded Ladybug graph has one writer. Wait this long for another ingest,
+    # restore, drain, or setup command to finish before failing explicitly.
+    writer_lock_timeout_seconds: float = Field(default=30.0, gt=0)
 
     @model_validator(mode="after")
     def validate_groups(self) -> GraphConfig:
@@ -105,6 +136,7 @@ class LLMConfig(OpenAIConfig):
     temperature: float | None = None
     max_tokens: int = Field(default=4096, ge=1)
     structured_output_mode: Literal["json_schema", "json_object"] = "json_schema"
+    api_mode: Literal["auto", "responses", "chat"] = "auto"
 
 
 class EmbedderConfig(OpenAIConfig):
@@ -129,6 +161,8 @@ class RerankerConfig(BaseModel):
     model: str = ""
     api_url: str = ""
     api_key: str = ""
+    min_score: float = Field(default=0.0, ge=0.0)
+    candidate_multiplier: int = Field(default=3, ge=1, le=10)
 
     @model_validator(mode="after")
     def validate_credentials(self) -> RerankerConfig:
@@ -170,6 +204,24 @@ class Settings(BaseModel):
         default_factory=lambda: EmbedderConfig(model="text-embedding-3-small")
     )
     reranker: RerankerConfig = Field(default_factory=RerankerConfig)
+
+    @model_validator(mode="after")
+    def validate_auth_scopes(self) -> Settings:
+        configured = set(self.graph.groups)
+        for grant in self.server.auth.grants():
+            forbidden = sorted(set(grant.groups) - configured)
+            if forbidden:
+                raise ValueError(f"server auth token grants an unconfigured group: {forbidden[0]}")
+            if (
+                self.database.provider == "ladybug"
+                and grant.groups
+                and set(grant.groups) != configured
+            ):
+                raise ValueError(
+                    "Ladybug is a single embedded graph and cannot enforce a partial token "
+                    "group scope; grant all configured groups or use FalkorDB/Neo4j"
+                )
+        return self
 
 
 def config_path(explicit: str | Path | None = None) -> Path:
