@@ -7,12 +7,12 @@
     "url": "https://github.com/renezander030/graphiti-local",
     "source": "github"
   },
-  "version": "0.4.1",
+  "version": "0.5.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "graphiti-local",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "transport": {
         "type": "stdio"
       }
