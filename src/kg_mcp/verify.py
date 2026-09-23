@@ -7,6 +7,7 @@ retrieval, and it never writes to the graph. Run it before and after any upgrade
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from kg_mcp.doctor import FAIL, OK, WARN, _check, run_checks, worst_status
@@ -50,11 +51,26 @@ async def check_tool_surface() -> list[dict[str, str]]:
 
 
 async def check_retrieval(query: str) -> list[dict[str, Any]]:
-    from kg_mcp.config import allowed_groups, load_config
+    from kg_mcp.config import (
+        allowed_groups,
+        load_config,
+        per_group_ladybug,
+        settings_for_group,
+    )
     from kg_mcp.retrieval import current_edges
     from kg_mcp.runtime import bounded, build_graphiti
 
     settings = load_config()
+    if per_group_ladybug(settings):
+        # Probe the first group that has a file; every group file has the same schema.
+        existing = [
+            group
+            for group in settings.graph.groups
+            if Path(settings.database.ladybug.path_for(group)).exists()
+        ]
+        if not existing:
+            return [_check("retrieval", WARN, "no group file exists yet; nothing to search")]
+        settings = settings_for_group(settings, existing[0])
     timeout = settings.graph.query_timeout_seconds
     try:
         graph = build_graphiti(settings, read_only=True)

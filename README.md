@@ -56,6 +56,32 @@ To review extraction before it touches the configured graph, run
 printed restore command to promote those exact records. Searches return current facts
 by default; `kg ask --history` is the explicit historical view.
 
+## Multiple users on Ladybug
+
+Give each user a group, and each group its own Ladybug file:
+
+```yaml
+graph:
+  groups: [alice, bob]
+database:
+  provider: ladybug
+  ladybug:
+    layout: per-group          # default: single, one file for every group
+    directory: ./workspace/groups
+server:
+  transport: streamable-http
+  auth:
+    tokens:
+      - {name: alice, token: "${ALICE_TOKEN}", groups: [alice]}
+      - {name: bob, token: "${BOB_TOKEN}", groups: [bob]}
+```
+
+Each file is named by the SHA-256 of its group, so no group id can point outside the
+directory. Reads, `kg ask` and the drain open only the file of the group they address;
+a token granted `alice` never opens Bob's file. A read names one group, or the token's
+single group is used. For a tenant boundary inside one database server, use FalkorDB
+or Neo4j.
+
 ## Is it a fit?
 
 Use it for local agent memory with explicit human review. Skip it if you need

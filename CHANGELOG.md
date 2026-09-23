@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+### Added
+
+- `database.ladybug.layout: per-group` stores each configured group in its own Ladybug
+  file inside `database.ladybug.directory`, named by the SHA-256 of the group so no id
+  can address a path outside it. Ingest, drain and restore write into the group's
+  file; the MCP tools, `kg ask` and the other reads open only the file of the group
+  they address. Bearer tokens may be scoped to a subset of groups in this layout, and
+  a token scoped to one group never opens another group's file. `single` remains the
+  default.
+- `kg_mcp.fingerprint.record_embedder`, `recorded_embedder` and `embedder_drift`
+  record and check the embedder that wrote a Ladybug file from its path alone, in
+  `<file>.embedder.json`. Configured writes also keep this record, and the configured
+  drift check reads it.
+- `kg_mcp.retrieval.keyword_edge_search_config` and `keyword_node_search_config`
+  return the BM25-only search configuration behind `kg ask --keyword` and `kg-demo`.
+- `kg_mcp.ladybug.extension_status` reports whether the FTS and VECTOR extensions are
+  installed for the running Ladybug engine version, with the command that installs
+  them.
+- `kg_mcp.ladybug.group_database_path` returns the contained per-group file path.
+- `docs/reference.md` lists the library helpers.
+
+### Fixed
+
+- `kg export` on a Ladybug graph exports every record when a named group holds no
+  edges.
+
 ## 0.4.1
 
 - Use absolute HTTPS URLs for the README logo and demo so both images render in the

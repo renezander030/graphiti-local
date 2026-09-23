@@ -23,6 +23,9 @@ database:
   provider: ladybug
   ladybug:
     path: ./workspace/example.ladybug
+    # One file per group instead, named by the group's SHA-256 inside `directory`:
+    # layout: per-group
+    # directory: ./workspace/groups
 
 llm:
   model: ${KG_LLM_MODEL:gpt-4.1-mini}

@@ -71,3 +71,44 @@ def candidate_limit(limit: int, settings: Settings) -> int:
     if limit < 1 or limit > 100:
         raise ValueError("result limit must be between 1 and 100")
     return min(1000, limit * settings.reranker.candidate_multiplier)
+
+
+def keyword_edge_search_config(limit: int = 10):
+    """A graphiti ``SearchConfig`` for facts that matches on keywords alone.
+
+    BM25 over the full-text index, ordered by reciprocal rank fusion. The vector half of
+    the default hybrid search embeds the query, so an embedding backend has to answer
+    before any question can; this config makes no model call at all, which keeps a graph
+    readable on a machine with nothing running. Pass it as ``config=`` to
+    ``Graphiti.search_``; the facts are in ``result.edges``.
+    """
+    from graphiti_core.search.search_config import (
+        EdgeReranker,
+        EdgeSearchConfig,
+        EdgeSearchMethod,
+        SearchConfig,
+    )
+
+    return SearchConfig(
+        edge_config=EdgeSearchConfig(
+            search_methods=[EdgeSearchMethod.bm25], reranker=EdgeReranker.rrf
+        ),
+        limit=limit,
+    )
+
+
+def keyword_node_search_config(limit: int = 10):
+    """Entity equivalent of :func:`keyword_edge_search_config`; results in ``result.nodes``."""
+    from graphiti_core.search.search_config import (
+        NodeReranker,
+        NodeSearchConfig,
+        NodeSearchMethod,
+        SearchConfig,
+    )
+
+    return SearchConfig(
+        node_config=NodeSearchConfig(
+            search_methods=[NodeSearchMethod.bm25], reranker=NodeReranker.rrf
+        ),
+        limit=limit,
+    )

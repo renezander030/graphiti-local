@@ -92,6 +92,42 @@ indexes before the read-only server opens it. `kg-ladybug-setup --apply` prepare
 them explicitly. Opening a reader never installs extensions automatically.
 For a database created by 0.2.x, run setup again to add the indexes.
 
+With `database.ladybug.layout: per-group`, each configured group is a separate file in
+`database.ladybug.directory`, named `<sha256 of the group>.ladybug`. Ingest, drain and
+restore write each record into its group's file, which the first write creates, and
+record the embedder beside that file. `kg ask`, `kg nodes`, `kg episodes`, `kg export`
+and the MCP search tools read one group per call; `kg status`, `kg edge`,
+`get_entity_edge` and `get_status` visit every group file the caller may read. Tokens
+may be scoped to a subset of groups in this layout.
+
+### Library use
+
+These helpers work from a database path and need no configuration file:
+
+| Name | Purpose |
+| --- | --- |
+| `kg_mcp.ladybug.build_ladybug_driver(path, read_only=...)` | A graphiti driver on one Ladybug file |
+| `kg_mcp.ladybug.group_database_path(directory, group)` | The contained SHA-256 file path for a group or user id |
+| `kg_mcp.ladybug.extension_status(path=None)` | `engine_version`, `installed`, `missing`, `ok` and the `fix` command for the FTS and VECTOR extensions of the running engine |
+| `kg_mcp.fingerprint.record_embedder(path, model=..., dimensions=...)` | Record the embedder that wrote a file, in `<file>.embedder.json` |
+| `kg_mcp.fingerprint.recorded_embedder(path)` | The recorded embedder, or `None` before the first write |
+| `kg_mcp.fingerprint.embedder_drift(path, model=..., dimensions=...)` | A refusal message when a different embedder would write, else `None` |
+| `kg_mcp.retrieval.keyword_edge_search_config(limit)` | A BM25-only `SearchConfig` for facts; no model call |
+| `kg_mcp.retrieval.keyword_node_search_config(limit)` | The same for entities |
+| `kg_mcp.write_lock.ladybug_path_lock(path, timeout)` | The cross-process writer lock the CLI uses |
+
+```python
+from kg_mcp.ladybug import build_ladybug_driver, extension_status, group_database_path
+from kg_mcp.retrieval import keyword_edge_search_config
+
+status = extension_status()
+if not status["ok"]:
+    raise SystemExit(f"missing {status['missing']}: {status['fix']}")
+path = group_database_path("./memory", user_id)
+driver = build_ladybug_driver(str(path), read_only=True)
+# Graphiti(graph_driver=driver, ...).search_(query, config=keyword_edge_search_config(10))
+```
+
 ## Explicit ingestion
 
 Ingestion is a separate command and is dry-run by default:

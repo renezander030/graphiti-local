@@ -80,6 +80,18 @@ def target_group(record: dict[str, Any], override: str | None, settings: Setting
     return group
 
 
+def file_group(record: dict[str, Any], override: str | None, settings: Settings) -> str:
+    """The group whose file a record is restored into, with the per-group Ladybug layout."""
+    group = override or str(record.get("group_id") or "")
+    if not group:
+        raise ValueError(
+            f"record {record.get('uuid')} has no group_id; pass --group to choose the "
+            "group file it is restored into"
+        )
+    allowed_groups(group, settings)
+    return group
+
+
 def build_model(record: dict[str, Any], group: str) -> Any:
     from graphiti_core.edges import EntityEdge, EpisodicEdge
     from graphiti_core.nodes import EntityNode, EpisodicNode
@@ -139,15 +151,25 @@ async def restore_snapshot(
     group: str | None = None,
     fail_fast: bool = False,
 ) -> dict[str, Any]:
+    from kg_mcp.config import per_group_ladybug, settings_for_group
+
     header, records = read_snapshot(path)
     settings = load_config()
     if group:
         allowed_groups(group, settings)
-    planned = [(record, target_group(record, group, settings)) for record in records]
+    per_group = per_group_ladybug(settings)
+    if per_group:
+        # One file per group: the record's group chooses the file; inside it the
+        # record is stored like any other Ladybug record.
+        files = [(record, file_group(record, group, settings)) for record in records]
+        planned = [(record, "") for record, _ in files]
+        groups = sorted({target for _, target in files})
+    else:
+        planned = [(record, target_group(record, group, settings)) for record in records]
+        groups = sorted({target for _, target in planned})
     counts = {kind: 0 for kind in KINDS}
     for record, _ in planned:
         counts[record["kind"]] += 1
-    groups = sorted({target for _, target in planned})
     summary = {
         "source": {
             "provider": header.get("provider"),
@@ -160,6 +182,36 @@ async def restore_snapshot(
     if not apply:
         return {"applied": False, "restored": {}, "failed": [], **summary}
 
+    if not per_group:
+        restored, failures = await _restore_into(settings, planned, fail_fast=fail_fast)
+        return {"applied": True, "restored": restored, "failed": failures, **summary}
+
+    bound = {target: settings_for_group(settings, target) for target in groups}
+    from kg_mcp import fingerprint
+
+    for target in bound.values():
+        message = fingerprint.drift(target)
+        if message:
+            raise ValueError(message)
+    restored = {kind: 0 for kind in KINDS}
+    failures: list[dict[str, Any]] = []
+    for target in groups:
+        subset = [(record, "") for record, chosen in files if chosen == target]
+        part, failed = await _restore_into(bound[target], subset, fail_fast=fail_fast)
+        for kind, count in part.items():
+            restored[kind] += count
+        failures.extend(failed)
+        if fail_fast and failures:
+            break
+    return {"applied": True, "restored": restored, "failed": failures, **summary}
+
+
+async def _restore_into(
+    settings: Settings,
+    planned: list[tuple[dict[str, Any], str]],
+    *,
+    fail_fast: bool,
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
     from kg_mcp import fingerprint
     from kg_mcp.runtime import build_graphiti
     from kg_mcp.write_lock import graph_writer_lock
@@ -214,7 +266,7 @@ async def restore_snapshot(
                 fingerprint.record(settings)
         finally:
             await graph.close()
-    return {"applied": True, "restored": restored, "failed": failures, **summary}
+    return restored, failures
 
 
 def human_lines(result: dict[str, Any]) -> list[str]:

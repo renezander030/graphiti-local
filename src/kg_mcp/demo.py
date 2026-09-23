@@ -141,18 +141,16 @@ def _ensure_graph(home: Path) -> Path:
 
 
 async def _ask(question: str, limit: int) -> list[dict[str, Any]]:
-    from kg_mcp.cli import _keyword_edge_config
     from kg_mcp.config import load_config
+    from kg_mcp.retrieval import current_edges, keyword_edge_search_config
     from kg_mcp.runtime import build_graphiti
 
     settings = load_config()
     graph = build_graphiti(settings, read_only=True)
     try:
         results = await graph.search_(
-            question, config=_keyword_edge_config(limit), group_ids=[GROUP]
+            question, config=keyword_edge_search_config(limit), group_ids=[GROUP]
         )
-        from kg_mcp.retrieval import current_edges
-
         edges, _ = current_edges(list(results.edges), include_invalidated=False)
         return [
             {"fact": edge.fact, "valid_at": edge.valid_at.isoformat() if edge.valid_at else None}

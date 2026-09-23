@@ -185,7 +185,26 @@ class Neo4jConfig(BaseModel):
 
 
 class LadybugConfig(BaseModel):
+    """Where the embedded graph lives.
+
+    ``single`` keeps every group in one file at ``path``. ``per-group`` gives each
+    configured group its own file inside ``directory``, named by the SHA-256 of the
+    group, so a reader bound to one group never opens another group's file.
+    """
+
     path: str = "./workspace/graph.ladybug"
+    layout: Literal["single", "per-group"] = "single"
+    directory: str = "./workspace/groups"
+
+    def path_for(self, group: str | None = None) -> str:
+        """The database file that holds ``group``."""
+        if self.layout == "single":
+            return self.path
+        if not group:
+            raise ValueError("the per-group Ladybug layout needs a group to choose a file")
+        from kg_mcp.ladybug import group_database_path
+
+        return str(group_database_path(self.directory, group))
 
 
 class DatabaseConfig(BaseModel):
@@ -214,12 +233,14 @@ class Settings(BaseModel):
                 raise ValueError(f"server auth token grants an unconfigured group: {forbidden[0]}")
             if (
                 self.database.provider == "ladybug"
+                and self.database.ladybug.layout == "single"
                 and grant.groups
                 and set(grant.groups) != configured
             ):
                 raise ValueError(
                     "Ladybug is a single embedded graph and cannot enforce a partial token "
-                    "group scope; grant all configured groups or use FalkorDB/Neo4j"
+                    "group scope; grant all configured groups, set "
+                    "database.ladybug.layout: per-group, or use FalkorDB/Neo4j"
                 )
         return self
 
@@ -256,3 +277,37 @@ def allowed_groups(requested: str | list[str] | None, settings: Settings) -> lis
     if settings.database.provider == "ladybug":
         return None
     return groups
+
+
+def per_group_ladybug(settings: Settings) -> bool:
+    """Whether each group lives in its own Ladybug file."""
+    database = settings.database
+    return database.provider == "ladybug" and database.ladybug.layout == "per-group"
+
+
+def settings_for_group(settings: Settings, group: str) -> Settings:
+    """A view of ``settings`` bound to the one file that holds ``group``.
+
+    With the per-group Ladybug layout every reader and writer goes through this, so the
+    rest of the code sees an ordinary single-file graph that contains only that group.
+    Any other configuration is returned unchanged.
+    """
+    if not per_group_ladybug(settings):
+        return settings
+    allowed_groups(group, settings)
+    ladybug = settings.database.ladybug.model_copy(
+        update={"path": settings.database.ladybug.path_for(group), "layout": "single"}
+    )
+    database = settings.database.model_copy(update={"ladybug": ladybug})
+    graph = settings.graph.model_copy(update={"groups": [group]})
+    return settings.model_copy(update={"database": database, "graph": graph})
+
+
+def single_group(groups: list[str], settings: Settings) -> str:
+    """The one group a per-group Ladybug read addresses, or a refusal naming the choice."""
+    if len(groups) != 1:
+        raise ValueError(
+            "the per-group Ladybug layout reads one group per call; name one of: "
+            + ", ".join(groups or settings.graph.groups)
+        )
+    return groups[0]

@@ -15,7 +15,15 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kg_mcp.config import Settings, TokenGrant, allowed_groups, load_config
+from kg_mcp.config import (
+    Settings,
+    TokenGrant,
+    allowed_groups,
+    load_config,
+    per_group_ladybug,
+    settings_for_group,
+    single_group,
+)
 from kg_mcp.runtime import bounded
 
 logger = logging.getLogger(__name__)
@@ -65,6 +73,14 @@ def _edge(edge: Any, score: float | None = None) -> dict[str, Any]:
 
 def authorized_groups(requested: str | list[str] | None, settings: Settings) -> list[str] | None:
     """Apply both the configured graph allow-list and the authenticated token scope."""
+    groups = granted_groups(requested, settings)
+    if settings.database.provider == "ladybug":
+        return None
+    return groups
+
+
+def granted_groups(requested: str | list[str] | None, settings: Settings) -> list[str]:
+    """The groups a request may read: the allow-list narrowed by the token scope."""
     token_scope = _request_group_scope.get()
     requested_groups = [requested] if isinstance(requested, str) else requested
     if not requested_groups:
@@ -78,9 +94,7 @@ def authorized_groups(requested: str | list[str] | None, settings: Settings) -> 
         forbidden = sorted(set(requested_groups) - token_scope)
         if forbidden:
             raise ValueError(f"group is not granted by the bearer token: {forbidden[0]}")
-    if settings.database.provider == "ladybug":
-        return None
-    return requested_groups
+    return list(requested_groups)
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -143,13 +157,17 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         from kg_mcp.runtime import build_graphiti
 
         active = settings or load_config()
-        graph = build_graphiti(active, read_only=True)
-        state.update(settings=active, graph=graph)
+        # With one Ladybug file per group, a group's file is opened on its first read.
+        graphs: dict[str, Any] = {}
+        if not per_group_ladybug(active):
+            graphs[""] = build_graphiti(active, read_only=True)
+        state.update(settings=active, graphs=graphs)
         try:
             yield state
         finally:
             state.clear()
-            await graph.close()
+            for graph in graphs.values():
+                await graph.close()
 
     selected = settings
     mcp = FastMCP(
@@ -161,16 +179,53 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         transport_security=transport_security(selected),
     )
 
-    def runtime() -> tuple[Any, Settings, float]:
-        if "graph" not in state:
+    def configured() -> Settings:
+        if "graphs" not in state:
             raise RuntimeError("Graphiti Local runtime is not initialized")
-        graph, active = state["graph"], state["settings"]
+        return state["settings"]
+
+    def runtime(requested: str | list[str] | None = None) -> tuple[Any, Settings, float]:
+        """The graph a request reads, and the settings it reads under.
+
+        With one Ladybug file per group the request must resolve to exactly one granted
+        group, and only that group's file is opened: a token scoped to one group cannot
+        reach another group's file. The returned settings are bound to that group.
+        """
+        active = configured()
+        key = ""
+        if per_group_ladybug(active):
+            key = single_group(granted_groups(requested, active), active)
+            active = settings_for_group(active, key)
+        graphs = state["graphs"]
+        if key not in graphs:
+            from kg_mcp.runtime import build_graphiti
+
+            path = Path(active.database.ladybug.path)
+            if not path.exists():
+                raise LookupError(
+                    f"no graph for group '{key}' yet; the first ingest or drain for it "
+                    "creates its file"
+                )
+            graphs[key] = build_graphiti(active, read_only=True)
+        graph = graphs[key]
         # An embedded read-only handle sees the file as it was at open time; a drain that
         # landed since must become visible without restarting the server.
         reopen = getattr(graph.driver, "reopen_if_changed", None)
         if reopen is not None:
             reopen()
         return graph, active, active.graph.query_timeout_seconds
+
+    def each_granted(requested: str | list[str] | None = None):
+        """Every granted group's graph that exists, for calls without a group argument."""
+        active = configured()
+        if not per_group_ladybug(active):
+            yield runtime(requested)
+            return
+        for group in granted_groups(requested, active):
+            try:
+                yield runtime(group)
+            except LookupError:
+                continue
 
     @mcp.tool()
     async def search_nodes(
@@ -184,7 +239,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if max_nodes < 1:
             return {"error": "max_nodes must be a positive integer"}
         try:
-            graph, active, timeout = runtime()
+            graph, active, timeout = runtime(group_ids)
             groups = authorized_groups(group_ids, active)
             from kg_mcp.retrieval import compatible_query
 
@@ -260,7 +315,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if max_facts < 1:
             return {"error": "max_facts must be a positive integer"}
         try:
-            graph, active, timeout = runtime()
+            graph, active, timeout = runtime(group_ids)
             groups = authorized_groups(group_ids, active)
             from kg_mcp.retrieval import (
                 candidate_limit,
@@ -309,9 +364,22 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     async def get_entity_edge(uuid: str) -> dict[str, Any]:
         """Get one fact edge by UUID from an allow-listed graph."""
         try:
+            from graphiti_core.edges import EntityEdge
+
+            if per_group_ladybug(configured()):
+                for graph, _, timeout in each_granted():
+                    try:
+                        edge = await bounded(
+                            EntityEdge.get_by_uuid(graph.driver, uuid), timeout, "get_entity_edge"
+                        )
+                    except TimeoutError:
+                        raise
+                    except Exception:
+                        continue
+                    return _edge(edge)
+                raise LookupError(f"edge not found: {uuid}")
             graph, active, timeout = runtime()
             groups = authorized_groups(None, active)
-            from graphiti_core.edges import EntityEdge
 
             if active.database.provider == "falkordb":
                 for group in groups or active.graph.groups:
@@ -346,7 +414,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if max_episodes < 1:
             return {"error": "max_episodes must be a positive integer"}
         try:
-            graph, active, timeout = runtime()
+            graph, active, timeout = runtime(group_ids)
             groups = authorized_groups(group_ids, active)
             episodes = await bounded(
                 graph.retrieve_episodes(
@@ -387,7 +455,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if not episode_uuids:
             return {"error": "episode_uuids must contain at least one UUID"}
         try:
-            graph, active, timeout = runtime()
+            graph, active, timeout = runtime(group_id)
             groups = authorized_groups(group_id, active)
             from graphiti_core.edges import EntityEdge
             from graphiti_core.nodes import EpisodicNode
@@ -436,6 +504,24 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     async def get_status() -> dict[str, Any]:
         """Check the server and its configured database connection."""
         try:
+            if per_group_ladybug(configured()):
+                granted = granted_groups(None, configured())
+                opened = []
+                for graph, active, timeout in each_granted():
+                    await bounded(
+                        graph.driver.execute_query("MATCH (n) RETURN count(n) AS count"),
+                        timeout,
+                        "get_status",
+                    )
+                    opened.extend(active.graph.groups)
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Graphiti Local is connected to ladybug; {len(opened)} of "
+                        f"{len(granted)} group file(s) exist"
+                    ),
+                    "groups": granted,
+                }
             graph, active, timeout = runtime()
             groups = authorized_groups(None, active)
             driver = graph.driver
