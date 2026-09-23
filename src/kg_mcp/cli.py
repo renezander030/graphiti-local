@@ -82,47 +82,6 @@ def _doctor_command(args: argparse.Namespace) -> dict[str, Any]:
     return {"status": worst_status(results), "checks": results}
 
 
-def _keyword_edge_config(limit: int):
-    """Edge search on BM25 alone, reranked by reciprocal rank fusion.
-
-    The vector half of the default hybrid search embeds the query, which means an
-    embedding backend has to be reachable before any question can be answered. Keyword
-    search needs no such call, so a shipped graph stays readable on a machine with
-    nothing running. Reciprocal rank fusion is kept because it orders a single result
-    list unchanged and costs no extra call.
-    """
-    from graphiti_core.search.search_config import (
-        EdgeReranker,
-        EdgeSearchConfig,
-        EdgeSearchMethod,
-        SearchConfig,
-    )
-
-    return SearchConfig(
-        edge_config=EdgeSearchConfig(
-            search_methods=[EdgeSearchMethod.bm25], reranker=EdgeReranker.rrf
-        ),
-        limit=limit,
-    )
-
-
-def _keyword_node_config(limit: int):
-    """Node equivalent of :func:`_keyword_edge_config`."""
-    from graphiti_core.search.search_config import (
-        NodeReranker,
-        NodeSearchConfig,
-        NodeSearchMethod,
-        SearchConfig,
-    )
-
-    return SearchConfig(
-        node_config=NodeSearchConfig(
-            search_methods=[NodeSearchMethod.bm25], reranker=NodeReranker.rrf
-        ),
-        limit=limit,
-    )
-
-
 async def _edge_search(
     graph: Any,
     args: argparse.Namespace,
@@ -134,6 +93,7 @@ async def _edge_search(
         candidate_limit,
         compatible_query,
         current_edges,
+        keyword_edge_search_config,
         rerank_edges,
     )
 
@@ -144,7 +104,7 @@ async def _edge_search(
     else:
         results = await graph.search_(
             query,
-            config=_keyword_edge_config(candidates),
+            config=keyword_edge_search_config(candidates),
             group_ids=groups,
         )
         edges = results.edges[:candidates]
@@ -155,7 +115,50 @@ async def _edge_search(
 
 
 async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
+    from kg_mcp.config import per_group_ladybug, settings_for_group, single_group
+
     settings = load_config()
+    if not per_group_ladybug(settings):
+        return await _graph_command_on(args, settings)
+    if args.command in ("status", "edge"):
+        return await _each_group_file(args, settings)
+    # One file per group: a read opens only the file of the one group it names.
+    requested = list(getattr(args, "groups", None) or [])
+    allowed_groups(requested or None, settings)
+    group = single_group(requested or settings.graph.groups, settings)
+    args.groups = [group]
+    return await _graph_command_on(args, settings_for_group(settings, group))
+
+
+async def _each_group_file(args: argparse.Namespace, settings: Any) -> dict[str, Any]:
+    """``status`` and ``edge`` visit every configured group's file that exists."""
+    from pathlib import Path
+
+    from kg_mcp.config import settings_for_group
+
+    existing = [
+        group
+        for group in settings.graph.groups
+        if Path(settings.database.ladybug.path_for(group)).exists()
+    ]
+    if args.command == "status":
+        counts = {group: 0 for group in settings.graph.groups}
+        for group in existing:
+            payload = await _graph_command_on(args, settings_for_group(settings, group))
+            counts[group] = payload["groups"][0]["nodes"]
+        return {
+            "provider": "ladybug",
+            "groups": [{"group": group, "nodes": count} for group, count in counts.items()],
+        }
+    for group in existing:
+        try:
+            return await _graph_command_on(args, settings_for_group(settings, group))
+        except CommandError:
+            continue
+    raise CommandError(f"edge not found: {args.uuid}")
+
+
+async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str, Any]:
     from kg_mcp.runtime import build_graphiti
 
     timeout = settings.graph.query_timeout_seconds
@@ -185,18 +188,22 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
                 ],
                 "suppressed_invalidated": suppressed,
                 "ranker": settings.reranker.provider,
-                "pending": _pending_items(groups),
+                "pending": _pending_items(groups or settings.graph.groups),
             }
         if args.command == "nodes":
             groups = allowed_groups(args.groups, settings)
-            from kg_mcp.retrieval import candidate_limit, compatible_query
+            from kg_mcp.retrieval import (
+                candidate_limit,
+                compatible_query,
+                keyword_node_search_config,
+            )
 
             candidate_limit(args.limit, settings)
             query = compatible_query(args.query, settings)
             from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 
             node_config = (
-                _keyword_node_config(args.limit) if args.keyword else NODE_HYBRID_SEARCH_RRF
+                keyword_node_search_config(args.limit) if args.keyword else NODE_HYBRID_SEARCH_RRF
             )
             result = await bounded(
                 graph.search_(query, config=node_config, group_ids=groups),

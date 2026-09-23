@@ -159,6 +159,43 @@ async def ingest_records(
         domain = str(record.get("domain") or settings.graph.groups[0])
         allowed_groups(domain, settings)
 
+    from kg_mcp.config import per_group_ladybug, settings_for_group
+
+    if per_group_ladybug(settings):
+        # One file per group: each domain's records go to its own file, under its own
+        # writer lock and embedder record, and never open another group's file.
+        by_domain: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            by_domain.setdefault(
+                str(record.get("domain") or settings.graph.groups[0]), []
+            ).append(record)
+        merged: dict[str, Any] = {
+            "applied": apply,
+            "ingested": 0,
+            "skipped": 0,
+            "failed": [],
+            "interrupted": False,
+            "planned": [],
+        }
+        for domain, subset in by_domain.items():
+            part = await ingest_records(
+                subset,
+                apply=apply,
+                resume=resume,
+                fail_fast=fail_fast,
+                ledger=ledger,
+                settings=settings_for_group(settings, domain),
+                track_fingerprint=track_fingerprint,
+            )
+            for key in ("ingested", "skipped"):
+                merged[key] += part[key]
+            merged["failed"].extend(part["failed"])
+            merged["planned"].extend(part["planned"])
+            merged["interrupted"] = merged["interrupted"] or part["interrupted"]
+            if part["interrupted"] or (fail_fast and part["failed"]):
+                break
+        return merged
+
     seen = completed_keys() if (resume and ledger) else set()
     planned, skipped = [], 0
     for record in records:
@@ -278,7 +315,7 @@ async def stage_extraction(
             update={
                 "provider": "ladybug",
                 "ladybug": settings.database.ladybug.model_copy(
-                    update={"path": str(database_path)}
+                    update={"path": str(database_path), "layout": "single"}
                 ),
             }
         )

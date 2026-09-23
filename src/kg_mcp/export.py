@@ -35,6 +35,7 @@ def default_output() -> Path:
 
 async def _collect(driver: Any, groups: list[str]) -> list[dict[str, Any]]:
     from graphiti_core.edges import EntityEdge, EpisodicEdge
+    from graphiti_core.errors import GroupsEdgesNotFoundError
     from graphiti_core.nodes import EntityNode, EpisodicNode
 
     kinds = (
@@ -47,6 +48,10 @@ async def _collect(driver: Any, groups: list[str]) -> list[dict[str, Any]]:
     for model, kind in kinds:
         try:
             records = await model.get_by_group_ids(driver, groups)
+        except GroupsEdgesNotFoundError:
+            # graphiti reports "no edges in these groups" as an error; it is an empty
+            # result, not a partial collection.
+            records = []
         except Exception as exc:
             raise RuntimeError(f"snapshot export could not collect {kind}: {exc}") from exc
         collected.extend(_serialize(record, kind) for record in records or [])

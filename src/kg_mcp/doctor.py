@@ -275,6 +275,20 @@ def check_embedding_model_known(settings: Settings) -> dict[str, str]:
     )
 
 
+def _per_group(check: Any, settings: Settings) -> list[dict[str, str]]:
+    """Run a per-graph check once per group file when each group has its own file."""
+    from kg_mcp.config import per_group_ladybug, settings_for_group
+
+    if not per_group_ladybug(settings):
+        return [check(settings)]
+    results = []
+    for group in settings.graph.groups:
+        result = check(settings_for_group(settings, group))
+        result["check"] = f"{result['check']}[{group}]"
+        results.append(result)
+    return results
+
+
 def run_checks(explicit: str | None = None, *, offline: bool = False) -> list[dict[str, str]]:
     results = [check_versions()]
     config_results, settings = check_config(explicit)
@@ -286,13 +300,13 @@ def run_checks(explicit: str | None = None, *, offline: bool = False) -> list[di
     results.append(check_reranker(settings))
     results.append(check_embedding_model_known(settings))
     results.append(check_embedding_dim_binding(settings))
-    results.append(check_embedder_fingerprint(settings))
+    results.extend(_per_group(check_embedder_fingerprint, settings))
     if offline:
         results.append(_check("database", WARN, "skipped (--offline)"))
         results.append(_check("llm", WARN, "skipped (--offline)"))
         results.append(_check("embedder", WARN, "skipped (--offline)"))
         return results
-    results.append(check_database(settings))
+    results.extend(_per_group(check_database, settings))
     results.append(check_llm(settings))
     results.append(check_embedder(settings))
     return results

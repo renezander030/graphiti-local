@@ -14,6 +14,7 @@ them and refuses to start without them, naming the command that fixes it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -31,6 +32,49 @@ def _alias_kuzu() -> Any:
 
     sys.modules.setdefault("kuzu", ladybug)
     return ladybug
+
+
+def group_database_path(directory: str | Path, group: str) -> Path:
+    """The file that holds one group in the per-group layout.
+
+    The name is the SHA-256 of the group, so no group or user id, however hostile, can
+    name a path outside ``directory``: ``../x``, an absolute path, a NUL byte and a
+    5000-character id all map to 64 hex characters inside it.
+    """
+    if not isinstance(group, str) or not group:
+        raise ValueError("group must be a non-empty string")
+    root = Path(directory).expanduser().resolve()
+    digest = hashlib.sha256(group.encode("utf-8", "surrogatepass")).hexdigest()
+    target = root / f"{digest}.ladybug"
+    if target.parent != root:  # cannot happen with a hex name; kept as a second guard
+        raise ValueError(f"group file escapes {root}")
+    return target
+
+
+def extension_status(database: str | Path | None = None) -> dict[str, Any]:
+    """Whether the FTS and VECTOR extensions are installed for the running engine.
+
+    Ladybug installs extensions per engine version, so an upgrade of the ``ladybug``
+    package leaves them missing until they are installed again. The check loads them
+    into a throwaway in-memory database and never touches a graph file. ``fix`` is the
+    command that installs them, or ``None`` when nothing is missing.
+    """
+    ladybug = _alias_kuzu()
+    database_handle = ladybug.Database(":memory:")
+    connection = ladybug.Connection(database_handle)
+    try:
+        missing = load_extensions(connection)
+    finally:
+        connection.close()
+        database_handle.close()
+    target = str(Path(database).expanduser().resolve()) if database else "PATH"
+    return {
+        "engine_version": getattr(ladybug, "__version__", "unknown"),
+        "installed": [name for name in EXTENSIONS if name not in missing],
+        "missing": missing,
+        "ok": not missing,
+        "fix": f"kg-ladybug-setup --database {target} --apply" if missing else None,
+    }
 
 
 def fulltext_indexes() -> list[tuple[str, str, str]]:
