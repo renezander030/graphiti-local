@@ -73,6 +73,28 @@ def candidate_limit(limit: int, settings: Settings) -> int:
     return min(1000, limit * settings.reranker.candidate_multiplier)
 
 
+def retrieval_stats(
+    *,
+    requested: int,
+    candidate_ceiling: int,
+    candidates_seen: int,
+    eligible: int,
+    returned: int,
+    suppressed: int = 0,
+) -> dict[str, Any]:
+    """Explain when bounded candidate generation may have hidden further matches."""
+    ceiling_reached = candidates_seen >= candidate_ceiling
+    return {
+        "requested": requested,
+        "candidate_limit": candidate_ceiling,
+        "candidates_seen": candidates_seen,
+        "eligible": eligible,
+        "returned": returned,
+        "suppressed": suppressed,
+        "recall_may_be_incomplete": ceiling_reached,
+    }
+
+
 def keyword_edge_search_config(limit: int = 10):
     """A graphiti ``SearchConfig`` for facts that matches on keywords alone.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 from typing import Any
 
@@ -20,6 +21,32 @@ def uses_responses_api(settings: Settings) -> bool:
     if settings.llm.api_mode == "chat":
         return False
     return _is_official_openai(settings.llm.api_url)
+
+
+def require_all_schema_properties(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a constrained-decoding schema that emits every declared object key.
+
+    Pydantic already represents optional values as nullable types. Grammar-backed
+    OpenAI-compatible servers interpret a property omitted from ``required`` as a key
+    they may leave out entirely, so temporal fields can disappear before validation.
+    Requiring the keys while preserving their nullable type keeps ``null`` distinct
+    from an omitted field. The input schema is never mutated.
+    """
+    prepared = copy.deepcopy(schema)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                value["required"] = list(properties)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(prepared)
+    return prepared
 
 
 async def bounded(awaitable: Any, seconds: float, what: str) -> Any:
@@ -113,7 +140,20 @@ def build_llm(settings: Settings):
     if uses_responses_api(settings):
         llm = OpenAIClient(config=llm_config, max_tokens=settings.llm.max_tokens)
     else:
-        llm = OpenAIGenericClient(
+        class GraphitiLocalGenericClient(OpenAIGenericClient):
+            def _build_response_format(self, response_model):
+                response_format = super()._build_response_format(response_model)
+                if (
+                    response_model is not None
+                    and self.structured_output_mode == "json_schema"
+                    and settings.llm.require_all_schema_properties
+                ):
+                    response_format["json_schema"]["schema"] = require_all_schema_properties(
+                        response_model.model_json_schema()
+                    )
+                return response_format
+
+        llm = GraphitiLocalGenericClient(
             config=llm_config,
             max_tokens=settings.llm.max_tokens,
             structured_output_mode=settings.llm.structured_output_mode,
@@ -127,6 +167,10 @@ def build_graphiti(settings: Settings, *, read_only: bool):
 
     from graphiti_core import Graphiti
     from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+
+    from kg_mcp.dedup import install_deterministic_tie_break
+
+    install_deterministic_tie_break()
 
     llm = build_llm(settings)
     embedder = OpenAIEmbedder(

@@ -52,9 +52,16 @@ to propose PostgreSQL, review and apply that update, and retrieve it from an MCP
 Model extraction can be wrong; inspect the returned facts and validity timestamps.
 
 To review extraction before it touches the configured graph, run
-`kg-ingest INPUT --review-output review.jsonl`, inspect the snapshot, then use the
-printed restore command to promote those exact records. Searches return current facts
+`kg-ingest INPUT --review-output review.jsonl`, inspect the snapshot, and mark every
+fact in the generated `review.jsonl.review.jsonl` file as `accept`, `refuse`, or
+`contested`. The printed restore command refuses unresolved decisions and promotes a
+checksum-sealed snapshot containing accepted facts only. Searches return current facts
 by default; `kg ask --history` is the explicit historical view.
+
+`kg-ingest` also accepts a Markdown/text file or a directory tree directly. Large
+documents split at stable text boundaries. Transient writes retry with one stable
+episode id; `ingest-receipts.jsonl` and `ingest-failures.jsonl` in the workspace show
+exactly what landed and what still needs attention.
 
 ## Multiple users on Ladybug
 

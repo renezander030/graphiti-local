@@ -16,15 +16,17 @@ from kg_mcp.config import Settings, TokenGrant
 
 
 def test_mcp_registry_manifest_matches_the_python_release():
+    from kg_mcp import __version__
+
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "server.json").read_text(encoding="utf-8"))
     assert manifest["name"] == "io.github.renezander030/graphiti-local"
-    assert manifest["version"] == "0.4.1"
+    assert manifest["version"] == __version__
     assert manifest["packages"] == [
         {
             "registryType": "pypi",
             "identifier": "graphiti-local",
-            "version": "0.4.1",
+            "version": __version__,
             "transport": {"type": "stdio"},
         }
     ]

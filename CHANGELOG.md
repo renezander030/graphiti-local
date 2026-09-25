@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- Episode ingestion retries transient model and database failures with bounded
+  exponential backoff. Every attempt reuses a content-derived episode UUID, successful
+  writes return and persist canonical episode/node/edge receipts, and exhausted failures
+  are appended to a durable failure ledger for reconciliation.
+- Staged extraction writes an `accept` / `refuse` / `contested` decision template for
+  every fact edge. Promotion refuses unresolved decisions, filters refused facts,
+  re-seals the approved snapshot, and records both the source and decision digests.
+- `kg-ingest` accepts Markdown, text, JSON, JSONL, and directory trees. Text is split at
+  stable paragraph and sentence boundaries before it reaches the model; empty or
+  unsupported inputs fail explicitly instead of reporting a zero-record success.
+- CLI and MCP retrieval responses include candidate, eligible, returned, and suppressed
+  counts plus `recall_may_be_incomplete` when the bounded candidate ceiling was reached.
+- OpenAI-compatible local models receive schemas whose nullable properties are present
+  in `required`, including nested temporal fields, so constrained decoding emits a key
+  with `null` rather than silently omitting it.
+- Entity fuzzy-match ties use a stable UUID ordering, independent of
+  `PYTHONHASHSEED` and worker process.
+
+### Changed
+
+- **`graphiti-core` is pinned to 0.30.2** for request-scoped FalkorDB routing and the
+  indexed edge-search fixes in that release.
+- `kg-ingest` splits source bodies above 12,000 characters by default. Pass
+  `--max-chars 0` to retain one episode per input record.
+
 ## 0.5.0
 
 ### Added
