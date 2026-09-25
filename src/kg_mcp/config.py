@@ -115,6 +115,10 @@ class GraphConfig(BaseModel):
     # An embedded Ladybug graph has one writer. Wait this long for another ingest,
     # restore, drain, or setup command to finish before failing explicitly.
     writer_lock_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Retry one episode rather than losing it when an inference endpoint or graph backend
+    # fails transiently. A content-derived episode UUID keeps those retries idempotent.
+    ingest_max_attempts: int = Field(default=3, ge=1, le=10)
+    ingest_retry_base_seconds: float = Field(default=1.0, ge=0, le=60)
 
     @model_validator(mode="after")
     def validate_groups(self) -> GraphConfig:
@@ -137,6 +141,10 @@ class LLMConfig(OpenAIConfig):
     max_tokens: int = Field(default=4096, ge=1)
     structured_output_mode: Literal["json_schema", "json_object"] = "json_schema"
     api_mode: Literal["auto", "responses", "chat"] = "auto"
+    # Grammar-backed OpenAI-compatible servers commonly omit schema properties that
+    # are not listed in ``required``. Keep nullable fields nullable, but require their
+    # keys so temporal values such as valid_at/invalid_at cannot disappear silently.
+    require_all_schema_properties: bool = True
 
 
 class EmbedderConfig(OpenAIConfig):

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphiti-local"
-version = "0.5.0"
+version = "0.6.0"
 description = "A local-first temporal knowledge graph with a read-only MCP server and CLI"
 readme = "README.md"
 requires-python = ">=3.10,<4"
@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
   "filelock>=3.16,<4",
-  "graphiti-core[falkordb]==0.30.1",
+  "graphiti-core[falkordb]==0.30.2",
   "ladybug>=0.19.1,<1",
   "mcp>=1.27,<2",
   "pydantic>=2.11,<3",

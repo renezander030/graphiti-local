@@ -135,30 +135,45 @@ Ingestion is a separate command and is dry-run by default:
 ```bash
 uv run kg-ingest examples/local_memory_demo.jsonl
 uv run kg-ingest examples/local_memory_demo.jsonl --apply
+uv run kg-ingest ./docs --domain example --apply
 ```
 
-Inputs are UTF-8 JSONL objects with `name` and `body`; `domain`, `valid_at`, and
-`provenance` are optional. A requested domain must be in `graph.groups`.
+Inputs may be UTF-8 JSONL/JSON records, Markdown/text files, or a directory containing
+those types. JSON records need `name` and `body`; `domain`, `valid_at`, and `provenance`
+are optional. `--domain` supplies the graph group for plain documents. A requested
+domain must be in `graph.groups`. Bodies split at stable paragraph/sentence boundaries
+above 12,000 characters; choose another bound with `--max-chars`, or pass `0` to keep
+one episode per source record. Empty and unsupported inputs fail explicitly.
 
 Ingestion is resumable. Each applied record is written to a content-keyed ledger in
 the workspace, so re-running the same file ingests only what has not landed yet
-instead of duplicating it. A record that fails is isolated and reported; the rest of
-the batch still lands, and the failure sets a non-zero exit code. Use `--no-resume`
-to ignore the ledger and `--fail-fast` for the old stop-at-first-error behaviour.
+instead of duplicating it. Each record has a content-derived episode UUID. Transient
+model and backend errors retry with bounded backoff; a record that still fails is
+isolated and reported, the rest of the batch lands, and the command exits non-zero.
+`ingest-receipts.jsonl` records canonical episode ids and node/edge counts;
+`ingest-failures.jsonl` records exhausted attempts for reconciliation. Use
+`--no-resume` to ignore the ledger and `--fail-fast` to stop after the first exhausted
+record.
 
 To inspect model extraction before it reaches the configured graph, stage it:
 
 ```bash
 kg-ingest notes.jsonl --review-output ./review.jsonl
 # inspect the entity_node, entity_edge, and episodic records in review.jsonl
-kg-ingest ./review.jsonl --restore --group team-a --apply
+# edit review.jsonl.review.jsonl: review -> accept, refuse, or contested
+kg-ingest ./review.jsonl --restore \
+  --review-decisions ./review.jsonl.review.jsonl \
+  --approved-output ./review.approved.jsonl --group team-a --apply
 ```
 
 The first command creates a disposable embedded graph, runs extraction there, exports
 the exact resolved records, and removes the temporary database. It never opens the
 configured production backend. One review snapshot accepts one domain so its promotion
-target remains explicit. The printed `promote` command restores the reviewed records
-without running extraction again.
+target remains explicit. The decision file names the source snapshot digest and one
+typed decision per fact. Promotion refuses missing, `review`, or `contested` rows,
+drops refused fact edges, updates episode provenance lists, and writes a new canonical
+snapshot carrying source and decision digests. The printed `promote` command restores
+that sealed result without running extraction again.
 
 `SIGTERM` and `SIGINT` stop it at a record boundary rather than mid-write: it finishes
 the record in flight, closes the driver, and reports `interrupted`. This matters when a
@@ -228,7 +243,10 @@ other correction.
 `reranker.candidate_multiplier` controls how many RRF candidates reach the configured
 cross encoder, and `reranker.min_score` filters only its final scores. Equal fact text
 does not collapse distinct edge UUIDs. `passthrough` keeps the original order without
-an extra model call.
+an extra model call. CLI and MCP search payloads include a `retrieval` object with the
+requested limit, candidate ceiling, candidates seen, eligible and returned counts, and
+`recall_may_be_incomplete`. The flag is true whenever the upstream candidate ceiling
+was reached, so an empty or short filtered result cannot masquerade as exhaustive.
 
 FalkorDB queries remove only a standalone `_` token, which RediSearch reserves, and a
 multi-label node search fans out by label before merging UUIDs. Identifiers such as
@@ -238,7 +256,10 @@ multi-label node search fans out by label before merging UUIDs. Identifiers such
 upstream prompt that requests a larger budget. `llm.api_mode` selects `responses`,
 `chat`, or `auto`; `auto` uses Responses on the official OpenAI endpoint and Chat
 Completions for compatible endpoints. Set it explicitly for a proxy whose URL does
-not reveal which API family it implements.
+not reveal which API family it implements. For grammar-backed compatible endpoints,
+`llm.require_all_schema_properties` defaults to true: nullable schema fields remain
+nullable but their keys are required, preventing temporal keys from vanishing during
+constrained decoding.
 
 Run the release gate before sharing:
 

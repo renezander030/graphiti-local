@@ -241,9 +241,10 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         try:
             graph, active, timeout = runtime(group_ids)
             groups = authorized_groups(group_ids, active)
-            from kg_mcp.retrieval import compatible_query
+            from kg_mcp.retrieval import candidate_limit, compatible_query, retrieval_stats
 
             safe_query = compatible_query(query, active)
+            candidates = candidate_limit(max_nodes, active)
             from graphiti_core.search.search_config_recipes import (
                 NODE_HYBRID_SEARCH_NODE_DISTANCE,
                 NODE_HYBRID_SEARCH_RRF,
@@ -252,7 +253,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
 
             recipe = (
                 NODE_HYBRID_SEARCH_NODE_DISTANCE if center_node_uuid else NODE_HYBRID_SEARCH_RRF
-            )
+            ).model_copy(update={"limit": candidates})
 
             async def find_nodes() -> list[Any]:
                 labels = entity_types or []
@@ -293,6 +294,13 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             return {
                 "message": "Nodes retrieved successfully" if nodes else "No relevant nodes found",
                 "nodes": nodes,
+                "retrieval": retrieval_stats(
+                    requested=max_nodes,
+                    candidate_ceiling=candidates,
+                    candidates_seen=len(found),
+                    eligible=len(found),
+                    returned=len(nodes),
+                ),
             }
         except Exception as exc:
             logger.exception("node search failed")
@@ -322,6 +330,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                 compatible_query,
                 current_edges,
                 rerank_edges,
+                retrieval_stats,
             )
 
             safe_query = compatible_query(query, active)
@@ -334,7 +343,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                 invalid_at=_date_range(invalid_at_after, invalid_at_before),
             )
 
-            async def find_facts() -> tuple[list[tuple[Any, float]], int]:
+            async def find_facts() -> tuple[list[tuple[Any, float]], dict[str, Any]]:
                 edges = await graph.search(
                     query=safe_query,
                     group_ids=groups,
@@ -346,14 +355,22 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                     list(edges), include_invalidated=include_invalidated
                 )
                 ranked = await rerank_edges(graph, safe_query, current, active, max_facts)
-                return ranked, suppressed
+                return ranked, retrieval_stats(
+                    requested=max_facts,
+                    candidate_ceiling=candidates,
+                    candidates_seen=len(edges),
+                    eligible=len(current),
+                    returned=len(ranked),
+                    suppressed=suppressed,
+                )
 
-            ranked, suppressed = await bounded(find_facts(), timeout, "search_memory_facts")
+            ranked, retrieval = await bounded(find_facts(), timeout, "search_memory_facts")
             facts = [_edge(edge, score) for edge, score in ranked]
             return {
                 "message": "Facts retrieved successfully" if facts else "No relevant facts found",
                 "facts": facts,
-                "suppressed_invalidated": suppressed,
+                "suppressed_invalidated": retrieval["suppressed"],
+                "retrieval": retrieval,
                 "ranker": active.reranker.provider,
             }
         except Exception as exc:

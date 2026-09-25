@@ -31,6 +31,8 @@ graph:
   # when a backend does not answer in time.
   query_timeout_seconds: 30
   writer_lock_timeout_seconds: 30
+  ingest_max_attempts: 3
+  ingest_retry_base_seconds: 1
 
 database:
   provider: ladybug
@@ -45,6 +47,7 @@ llm:
   temperature: 0
   api_mode: chat
   max_tokens: 4096
+  require_all_schema_properties: true
 
 embedder:
   model: ${KG_EMBEDDER_MODEL:nomic-embed-text}

@@ -87,7 +87,7 @@ async def _edge_search(
     args: argparse.Namespace,
     groups: list[str] | None,
     settings: Any,
-) -> tuple[list[tuple[Any, float]], int]:
+) -> tuple[list[tuple[Any, float]], dict[str, Any]]:
     """Return current, identity-safe reranked edges."""
     from kg_mcp.retrieval import (
         candidate_limit,
@@ -95,6 +95,7 @@ async def _edge_search(
         current_edges,
         keyword_edge_search_config,
         rerank_edges,
+        retrieval_stats,
     )
 
     query = compatible_query(args.query, settings)
@@ -111,7 +112,15 @@ async def _edge_search(
     current, suppressed = current_edges(
         list(edges), include_invalidated=getattr(args, "history", False)
     )
-    return await rerank_edges(graph, query, current, settings, args.limit), suppressed
+    ranked = await rerank_edges(graph, query, current, settings, args.limit)
+    return ranked, retrieval_stats(
+        requested=args.limit,
+        candidate_ceiling=candidates,
+        candidates_seen=len(edges),
+        eligible=len(current),
+        returned=len(ranked),
+        suppressed=suppressed,
+    )
 
 
 async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -166,7 +175,7 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
     try:
         if args.command == "ask":
             groups = allowed_groups(args.groups, settings)
-            results, suppressed = await bounded(
+            results, retrieval = await bounded(
                 _edge_search(graph, args, groups, settings),
                 timeout,
                 "ask",
@@ -186,7 +195,8 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                     }
                     for result, score in results
                 ],
-                "suppressed_invalidated": suppressed,
+                "suppressed_invalidated": retrieval["suppressed"],
+                "retrieval": retrieval,
                 "ranker": settings.reranker.provider,
                 "pending": _pending_items(groups or settings.graph.groups),
             }
@@ -196,26 +206,38 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                 candidate_limit,
                 compatible_query,
                 keyword_node_search_config,
+                retrieval_stats,
             )
 
-            candidate_limit(args.limit, settings)
+            candidates = candidate_limit(args.limit, settings)
             query = compatible_query(args.query, settings)
             from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 
             node_config = (
-                keyword_node_search_config(args.limit) if args.keyword else NODE_HYBRID_SEARCH_RRF
+                keyword_node_search_config(candidates)
+                if args.keyword
+                else NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": candidates})
             )
             result = await bounded(
                 graph.search_(query, config=node_config, group_ids=groups),
                 timeout,
                 "nodes",
             )
+            nodes = list(result.nodes or [])
+            returned = nodes[: args.limit]
             return {
                 "query": args.query,
                 "nodes": [
                     {"name": node.name, "group_id": node.group_id, "uuid": node.uuid}
-                    for node in result.nodes[: args.limit]
+                    for node in returned
                 ],
+                "retrieval": retrieval_stats(
+                    requested=args.limit,
+                    candidate_ceiling=candidates,
+                    candidates_seen=len(nodes),
+                    eligible=len(nodes),
+                    returned=len(returned),
+                ),
             }
         if args.command == "episodes":
             groups = allowed_groups(args.groups, settings)

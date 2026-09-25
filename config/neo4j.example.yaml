@@ -18,6 +18,8 @@ graph:
   # when a backend does not answer in time.
   query_timeout_seconds: 30
   writer_lock_timeout_seconds: 30
+  ingest_max_attempts: 3
+  ingest_retry_base_seconds: 1
 
 database:
   provider: neo4j
@@ -33,6 +35,7 @@ llm:
   structured_output_mode: json_schema
   api_mode: auto
   max_tokens: 4096
+  require_all_schema_properties: true
 
 embedder:
   model: ${KG_EMBEDDER_MODEL:text-embedding-3-small}
