@@ -60,6 +60,7 @@ def _edge(edge: Any, score: float | None = None) -> dict[str, Any]:
         "fact": edge.fact,
         "source_node_uuid": edge.source_node_uuid,
         "target_node_uuid": edge.target_node_uuid,
+        "episodes": list(getattr(edge, "episodes", None) or []),
         "group_id": edge.group_id,
         "created_at": _iso(edge.created_at),
         "valid_at": _iso(edge.valid_at),

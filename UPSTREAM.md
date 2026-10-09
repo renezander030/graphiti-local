@@ -1,7 +1,7 @@
 # Upstream and provenance
 
 Graphiti Local is an independent community integration package. It depends on
-[Graphiti](https://github.com/getzep/graphiti) (`graphiti-core==0.30.1`) for the
+[Graphiti](https://github.com/getzep/graphiti) (`graphiti-core==0.30.2`) for the
 temporal graph model and search implementation. Graphiti is Apache-2.0 licensed.
 Graphiti Local is not affiliated with or endorsed by Zep.
 

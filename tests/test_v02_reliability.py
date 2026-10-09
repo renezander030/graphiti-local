@@ -195,7 +195,13 @@ def test_drain_archives_only_what_landed(configured, monkeypatch):
     workspace._human_set_status({i["id"] for i in workspace.pending_for()}, "approved")
 
     async def ok_ingest(records, **kwargs):
-        return {"applied": True, "ingested": 1, "skipped": 0, "failed": []}
+        return {
+            "applied": True,
+            "ingested": 1,
+            "skipped": 0,
+            "failed": [],
+            "receipts": [{"episode_uuid": "episode-1", "edges": 1}],
+        }
 
     monkeypatch.setattr("kg_mcp.ingest.ingest_records", ok_ingest)
     result = asyncio.run(workspace.drain(apply=True))

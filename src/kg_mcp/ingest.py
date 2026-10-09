@@ -788,6 +788,16 @@ def main() -> None:
         fail(str(exc), as_json=as_json)
         return
     result["total"] = len(records)
+    # A record can land and still yield nothing: the model extracted no fact from it.
+    result["no_facts"] = [
+        {
+            "name": receipt["name"],
+            "domain": receipt["domain"],
+            "episode_uuid": receipt["episode_uuid"],
+        }
+        for receipt in result.get("receipts", [])
+        if receipt.get("edges") == 0
+    ]
 
     def human() -> list[str]:
         if not result["applied"]:
@@ -803,6 +813,10 @@ def main() -> None:
         if result.get("interrupted"):
             lines.append("stopped early on a termination signal; re-run to continue")
         lines.extend(f"FAILED [{f['domain']}] {f['name']}: {f['error']}" for f in result["failed"])
+        lines.extend(
+            f"NO FACTS [{item['domain']}] {item['name']}: extraction produced no facts"
+            for item in result["no_facts"]
+        )
         return lines
 
     emit(result, human=human, as_json=as_json)

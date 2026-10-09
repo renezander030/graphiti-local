@@ -23,6 +23,9 @@ kg edge UUID
 kg status
 kg pending [group]
 kg propose GROUP "fact" --type source-fact --provenance "source"
+           [--source SYSTEM --link URL] [--valid-at ISO] [--learned-at ISO]
+           [--supersedes-rejection ID]
+kg bundle GROUP --fact "fact" --fact "fact" [same options as propose]
 kg doctor [--offline]
 kg export [group ...] [--output PATH]
 kg duplicates [group ...]
@@ -33,6 +36,39 @@ kg --version
 `propose` appends to a local JSONL queue. It does not modify the graph. A human
 uses `kg-workspace approve`, reviews the dry run from `kg-workspace drain`, and
 adds `--apply` only when the proposal is ready.
+
+### Proposals
+
+A proposal is one fact. `--valid-at` says when it became true and `--learned-at` when
+it was observed; the drain dates the fact by `--valid-at` and falls back to the time it
+was queued. `--source` and `--link` name the system and the record the fact comes from,
+and travel with it into the episode provenance that `kg edge` shows. `kg bundle` files
+several facts from one source as one item, approved once and drained as one episode per
+fact; a partial drain resumes with the facts that have not landed.
+
+Before anything is queued, a proposal passes these checks:
+
+| Exit | Refusal |
+| ---- | ------- |
+| `2` | unconfigured group, malformed or future timestamp, or a missing `--source`/`--link` when `workspace.require_source` is set |
+| `4` | more than one sentence (`workspace.atomic_proposals`, default on) |
+| `5` | shares at least `workspace.reject_similarity` (default 0.75) of its words with a rejected proposal in the same group; `--supersedes-rejection ID` acknowledges it |
+| `6` | carries an API key, token, private key, credential assignment or IBAN shape; the value is never echoed |
+
+`kg-workspace reject ID --reason "..."` moves the proposal to `archive.jsonl` with its
+reason, which the refusal above prints; `kg-workspace rejected [group]` lists them.
+`kg-workspace approve` binds the approval to a digest of the proposal content. A
+proposal edited after approval is not drained until it is approved again, and the drain
+dry run marks it. A proposal whose extraction yields no fact stays approved and is
+reported, instead of being archived as landed; `kg-ingest` lists such records under
+`no_facts`.
+
+```yaml
+workspace:
+  atomic_proposals: true
+  reject_similarity: 0.75
+  require_source: false
+```
 
 ## Built for unattended use
 
