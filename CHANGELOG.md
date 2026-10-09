@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.7.0
+
+This release makes the review queue land exactly what a reviewer approved, dated by
+when it happened and traceable to where it came from.
+
+### Breaking
+
+- A proposal is one sentence. A compound proposal exits `4` and lists its sentences;
+  file several facts from one source with `kg bundle`, or set
+  `workspace.atomic_proposals: false`.
+- `kg-workspace approve` binds the approval to a digest of the proposal content.
+  Proposals approved by an earlier version are held by the drain until approved again.
+- `kg-workspace drain` keeps a proposal whose extraction produced no fact approved and
+  reports it as failed, instead of archiving it.
+- Rejected proposals move from `pending.jsonl` to `archive.jsonl`.
+
+### Added
+
+- `kg propose --valid-at` and `--learned-at`. The drain dates a fact by when it became
+  true and falls back to the time it was queued; corrections carry the same date.
+  Future and malformed timestamps exit `2`.
+- `kg propose --source SYSTEM --link URL` record where a fact comes from. Both travel
+  into the episode provenance. `workspace.require_source: true` refuses a proposal
+  without them.
+- `kg bundle GROUP --fact ... --fact ...` files several facts from one source as one
+  reviewed item. Every fact passes the proposal checks on its own, each lands as its
+  own episode, and a partial drain resumes with the facts that have not landed.
+- `kg-workspace reject --reason` records why, and `kg-workspace rejected [group]` lists
+  rejections. A proposal sharing `workspace.reject_similarity` (default 0.75) of its
+  words with a rejected one in the same group exits `5` and prints the rejection and
+  its reason; `--supersedes-rejection ID` acknowledges it.
+- Proposals carrying an API key, token, private key, credential assignment or IBAN
+  shape exit `6` without echoing the value.
+- `kg ask` facts carry `source_node_uuid`, `target_node_uuid` and `episodes`;
+  `kg edge` lists each episode with the provenance it was ingested under. MCP fact
+  results carry `episodes`.
+- `kg-ingest` lists records whose extraction produced no fact under `no_facts`.
+- `kg-workspace approve` and `reject` exit `2` and name every id they did not decide.
+
 ## 0.6.0
 
 ### Added

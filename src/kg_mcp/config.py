@@ -130,6 +130,17 @@ class GraphConfig(BaseModel):
         return self
 
 
+class WorkspaceConfig(BaseModel):
+    # One sentence per proposal, so a later revise or invalidate replaces exactly one fact.
+    # `kg bundle` files several facts of one source under one approval.
+    atomic_proposals: bool = True
+    # A proposal sharing at least this share of its words with a rejected one in the same
+    # group is refused unless it names that rejection with --supersedes-rejection.
+    reject_similarity: float = Field(default=0.75, gt=0, le=1)
+    # Refuse proposals that name no source system and link to the record.
+    require_source: bool = False
+
+
 class OpenAIConfig(BaseModel):
     model: str
     api_url: str = "https://api.openai.com/v1"
@@ -225,6 +236,7 @@ class DatabaseConfig(BaseModel):
 class Settings(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     graph: GraphConfig = Field(default_factory=GraphConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     llm: LLMConfig = Field(default_factory=lambda: LLMConfig(model="gpt-4.1-mini"))
     embedder: EmbedderConfig = Field(

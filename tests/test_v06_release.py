@@ -40,9 +40,8 @@ def test_release_metadata_and_core_pin_are_in_sync():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "server.json").read_text(encoding="utf-8"))
     project = (root / "pyproject.toml").read_text(encoding="utf-8")
-    assert manifest["version"] == "0.6.0"
-    assert manifest["packages"][0]["version"] == "0.6.0"
-    assert 'version = "0.6.0"' in project
+    assert manifest["version"] == manifest["packages"][0]["version"]
+    assert f'version = "{manifest["version"]}"' in project
     assert 'graphiti-core[falkordb]==0.30.2' in project
 
 

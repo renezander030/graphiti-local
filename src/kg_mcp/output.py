@@ -16,6 +16,10 @@ from typing import Any
 EXIT_ERROR = 1
 EXIT_REJECTED = 2
 EXIT_TIMEOUT = 3
+# Proposal gates: each refusal has its own code so a caller can react without parsing.
+EXIT_NOT_ATOMIC = 4
+EXIT_RESEMBLES_REJECTED = 5
+EXIT_SECRET_SHAPED = 6
 
 
 class CommandError(Exception):

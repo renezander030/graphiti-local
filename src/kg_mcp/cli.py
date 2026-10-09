@@ -58,21 +58,38 @@ def _propose_command(args: argparse.Namespace) -> dict[str, Any]:
         allowed_groups(args.group, settings)
     except ValueError as exc:
         raise CommandError(str(exc), code=EXIT_REJECTED) from exc
-    item = add_proposal(
-        args.group,
-        args.fact,
-        fact_type=args.type,
-        provenance=args.provenance,
-        operation=args.operation,
-        supersedes=args.supersedes,
-    )
-    return {
+    common = {
+        "fact_type": args.type,
+        "provenance": args.provenance,
+        "source": args.source,
+        "link": args.link,
+        "valid_at": args.valid_at,
+        "learned_at": args.learned_at,
+        "supersedes_rejection": args.supersedes_rejection,
+    }
+    if args.command == "bundle":
+        from kg_mcp.workspace import add_bundle
+
+        item = add_bundle(args.group, args.fact, **common)
+    else:
+        item = add_proposal(
+            args.group,
+            args.fact,
+            operation=args.operation,
+            supersedes=args.supersedes,
+            **common,
+        )
+    payload = {
         "proposed": item["id"],
         "domain": item["domain"],
         "fact_type": item["fact_type"],
         "operation": item["operation"],
         "status": item["status"],
     }
+    for key in ("facts", "valid_at", "learned_at", "source", "link"):
+        if key in item:
+            payload[key] = item[key]
+    return payload
 
 
 def _doctor_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -188,6 +205,9 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                         "fact": result.fact,
                         "uuid": getattr(result, "uuid", None),
                         "group_id": getattr(result, "group_id", None),
+                        "source_node_uuid": getattr(result, "source_node_uuid", None),
+                        "target_node_uuid": getattr(result, "target_node_uuid", None),
+                        "episodes": list(getattr(result, "episodes", None) or []),
                         "valid_at": _iso(getattr(result, "valid_at", None)),
                         "invalid_at": _iso(getattr(result, "invalid_at", None)),
                         "expired_at": _iso(getattr(result, "expired_at", None)),
@@ -269,9 +289,11 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
             drivers = [graph.driver]
             if settings.database.provider == "falkordb":
                 drivers = [graph.driver.clone(database=group) for group in settings.graph.groups]
+            found_on = None
             for driver in drivers:
                 try:
                     edge = await bounded(EntityEdge.get_by_uuid(driver, args.uuid), timeout, "edge")
+                    found_on = driver
                     break
                 except TimeoutError:
                     raise
@@ -285,6 +307,9 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                 "valid_at": _iso(edge.valid_at),
                 "invalid_at": _iso(edge.invalid_at),
                 "group_id": edge.group_id,
+                "source_node_uuid": edge.source_node_uuid,
+                "target_node_uuid": edge.target_node_uuid,
+                "episodes": await _episode_sources(found_on, edge.episodes or [], timeout),
             }
         if args.command == "status":
             provider = settings.database.provider
@@ -323,6 +348,30 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
         await graph.close()
 
 
+async def _episode_sources(driver: Any, uuids: list[str], timeout: float) -> list[dict]:
+    """The episodes that produced a fact, with the provenance each was ingested under."""
+    if not uuids:
+        return []
+    from graphiti_core.nodes import EpisodicNode
+
+    try:
+        episodes = await bounded(EpisodicNode.get_by_uuids(driver, uuids), timeout, "edge")
+    except TimeoutError:
+        raise
+    except Exception:
+        episodes = []
+    by_uuid = {episode.uuid: episode for episode in episodes}
+    return [
+        {
+            "uuid": uuid,
+            "name": getattr(by_uuid.get(uuid), "name", None),
+            "source_description": getattr(by_uuid.get(uuid), "source_description", None),
+            "valid_at": _iso(getattr(by_uuid.get(uuid), "valid_at", None)),
+        }
+        for uuid in uuids
+    ]
+
+
 def _render(command: str, payload: dict[str, Any]) -> list[str]:
     if command == "ask":
         lines = [f" • {item['fact']}" for item in payload["facts"]] or [" (no facts)"]
@@ -340,6 +389,12 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
             f"valid_at:   {payload['valid_at']}",
             f"invalid_at: {payload['invalid_at']}",
             f"group:      {payload['group_id']}",
+            f"from:       {payload['source_node_uuid']} -> {payload['target_node_uuid']}",
+            *(
+                f"episode:    {episode['uuid']} {episode['name'] or ''} "
+                f"({episode['source_description'] or 'no provenance'})"
+                for episode in payload["episodes"]
+            ),
         ]
     if command == "status":
         head = f"provider: {payload['provider']}; groups: " + ", ".join(
@@ -351,8 +406,9 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
         return [f"{i['id']} [{i['domain']}] {i['text']}" for i in items] + [
             f"({len(items)} pending)"
         ]
-    if command == "propose":
-        return [f"proposed {payload['proposed']} [{payload['domain']} {payload['fact_type']}]"]
+    if command in ("propose", "bundle"):
+        head = f"proposed {payload['proposed']} [{payload['domain']} {payload['fact_type']}]"
+        return [head, *(f"  - {fact}" for fact in payload.get("facts", []))]
     if command in ("doctor", "verify"):
         mark = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}
         lines = [
@@ -384,7 +440,7 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
 async def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "pending":
         return await _pending_command(args)
-    if args.command == "propose":
+    if args.command in ("propose", "bundle"):
         return _propose_command(args)
     if args.command == "doctor":
         return _doctor_command(args)
@@ -458,14 +514,36 @@ def parser() -> argparse.ArgumentParser:
     pending = commands.add_parser("pending", parents=[common])
     pending.add_argument("group", nargs="?")
     propose = commands.add_parser("propose", parents=[common])
-    propose.add_argument("group")
-    propose.add_argument("fact")
-    propose.add_argument(
-        "--type",
-        choices=("belief", "source-fact", "action-record", "live-finding"),
-        default="belief",
+    bundle = commands.add_parser(
+        "bundle",
+        parents=[common],
+        help="several facts from one source, reviewed and approved as one item",
     )
-    propose.add_argument("--provenance", "--prov", default="")
+    for command in (propose, bundle):
+        command.add_argument("group")
+        if command is propose:
+            command.add_argument("fact")
+        else:
+            command.add_argument("--fact", action="append", required=True, default=[])
+        command.add_argument(
+            "--type",
+            choices=("belief", "source-fact", "action-record", "live-finding"),
+            default="belief",
+        )
+        command.add_argument("--provenance", "--prov", default="")
+        command.add_argument("--source", default="", help="the system the fact comes from")
+        command.add_argument("--link", default="", help="a link to the record in that system")
+        command.add_argument(
+            "--valid-at", default="", help="ISO date or datetime the fact became true"
+        )
+        command.add_argument(
+            "--learned-at", default="", help="ISO date or datetime the fact was observed"
+        )
+        command.add_argument(
+            "--supersedes-rejection",
+            default="",
+            help="id of a rejected proposal this one knowingly resembles",
+        )
     propose.add_argument(
         "--operation",
         "--op",
