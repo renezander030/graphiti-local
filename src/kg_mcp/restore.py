@@ -10,12 +10,12 @@ snapshot twice updates rather than duplicates. Like ingestion, it is a dry run w
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 from typing import Any
 
 from kg_mcp.config import Settings, allowed_groups, load_config
-from kg_mcp.export import EMBEDDING_FIELDS, FORMAT_VERSION
+from kg_mcp.export import EMBEDDING_FIELDS, FORMAT_VERSION, json_rows
+from kg_mcp.queries import graph_drivers
 
 KINDS = ("entity_node", "episodic_node", "entity_edge", "episodic_edge")
 SUPPORTED_FORMATS = (1, FORMAT_VERSION)
@@ -25,15 +25,7 @@ def read_snapshot(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     header: dict[str, Any] | None = None
     records: list[dict[str, Any]] = []
     digest = hashlib.sha256()
-    for line_number, line in enumerate(path.open(encoding="utf-8"), 1):
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
-        if not isinstance(item, dict):
-            raise ValueError(f"{path}:{line_number}: each line must be an object")
+    for line_number, line, item in json_rows(path):
         if header is None:
             if item.get("kind") != "export":
                 raise ValueError(f"{path}: not a kg export snapshot (no export header)")
@@ -114,12 +106,6 @@ async def _embed(model: Any, embedder: Any) -> None:
         await model.generate_name_embedding(embedder)
     elif hasattr(model, "generate_embedding"):
         await model.generate_embedding(embedder)
-
-
-def _driver_for(graph: Any, settings: Settings, group: str) -> Any:
-    if settings.database.provider == "falkordb":
-        return graph.driver.clone(database=group)
-    return graph.driver
 
 
 ENDPOINTS = {
@@ -212,60 +198,49 @@ async def _restore_into(
     *,
     fail_fast: bool,
 ) -> tuple[dict[str, int], list[dict[str, Any]]]:
-    from kg_mcp import fingerprint
-    from kg_mcp.runtime import build_graphiti
-    from kg_mcp.write_lock import graph_writer_lock
-
-    message = fingerprint.drift(settings)
-    if message:
-        raise ValueError(message)
+    from kg_mcp.runtime import writing
 
     restored = {kind: 0 for kind in KINDS}
     failures: list[dict[str, Any]] = []
-    with graph_writer_lock(settings):
-        graph = build_graphiti(settings, read_only=False)
-        try:
-            await graph.build_indices_and_constraints()
-            known: dict[str, dict[str, set[str]]] = {}
-            for kind in KINDS:
-                for record, target in planned:
-                    if record["kind"] != kind:
-                        continue
-                    driver = _driver_for(graph, settings, target)
-                    try:
-                        model = build_model(record, target)
-                        if kind in ENDPOINTS:
-                            if target not in known:
-                                known[target] = {
-                                    label: await _known_uuids(driver, label)
-                                    for label in ("Entity", "Episodic")
-                                }
-                            missing = _missing_endpoint(model, kind, known[target])
-                            if missing:
-                                raise LookupError(missing)
-                        await _embed(model, graph.embedder)
-                        await model.save(driver)
-                    except Exception as exc:  # one bad record must not cost the snapshot
-                        detail = str(exc).strip() or f"{type(exc).__name__} (no message)"
-                        failures.append(
-                            {
-                                "kind": kind,
-                                "uuid": record.get("uuid"),
-                                "operation": "restore record",
-                                "error_type": type(exc).__name__,
-                                "error": detail,
+    async with writing(settings) as session:
+        graph = session.graph
+        known: dict[str, dict[str, set[str]]] = {}
+        for kind in KINDS:
+            for record, target in planned:
+                if record["kind"] != kind:
+                    continue
+                driver = graph_drivers(graph, settings, [target])[0]
+                try:
+                    model = build_model(record, target)
+                    if kind in ENDPOINTS:
+                        if target not in known:
+                            known[target] = {
+                                label: await _known_uuids(driver, label)
+                                for label in ("Entity", "Episodic")
                             }
-                        )
-                        if fail_fast:
-                            break
-                        continue
-                    restored[kind] += 1
-                if fail_fast and failures:
-                    break
-            if any(restored.values()):
-                fingerprint.record(settings)
-        finally:
-            await graph.close()
+                        missing = _missing_endpoint(model, kind, known[target])
+                        if missing:
+                            raise LookupError(missing)
+                    await _embed(model, graph.embedder)
+                    await model.save(driver)
+                except Exception as exc:  # one bad record must not cost the snapshot
+                    detail = str(exc).strip() or f"{type(exc).__name__} (no message)"
+                    failures.append(
+                        {
+                            "kind": kind,
+                            "uuid": record.get("uuid"),
+                            "operation": "restore record",
+                            "error_type": type(exc).__name__,
+                            "error": detail,
+                        }
+                    )
+                    if fail_fast:
+                        break
+                    continue
+                restored[kind] += 1
+            if fail_fast and failures:
+                break
+        session.wrote = any(restored.values())
     return restored, failures
 
 

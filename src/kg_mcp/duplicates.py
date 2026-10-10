@@ -45,23 +45,9 @@ def cluster(nodes: list[Any]) -> list[dict[str, Any]]:
 async def _entities(graph: Any, settings: Any, groups: list[str]) -> list[Any]:
     from graphiti_core.nodes import EntityNode
 
-    provider = settings.database.provider
-    if provider == "falkordb":
-        nodes: list[Any] = []
-        for group in groups:
-            driver = graph.driver.clone(database=group)
-            nodes.extend(await EntityNode.get_by_group_ids(driver, [group]) or [])
-        return nodes
-    if provider == "ladybug":
-        seen: set[str] = set()
-        nodes = []
-        for candidate in (groups, [""]):
-            for node in await EntityNode.get_by_group_ids(graph.driver, candidate) or []:
-                if node.uuid not in seen:
-                    seen.add(node.uuid)
-                    nodes.append(node)
-        return nodes
-    return list(await EntityNode.get_by_group_ids(graph.driver, groups) or [])
+    from kg_mcp.queries import collect
+
+    return await collect(graph, settings, groups, EntityNode.get_by_group_ids)
 
 
 async def find_duplicates(

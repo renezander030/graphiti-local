@@ -6,8 +6,6 @@ retrieval, and it never writes to the graph. Run it before and after any upgrade
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from kg_mcp.doctor import FAIL, OK, WARN, _check, run_checks, worst_status
@@ -53,21 +51,19 @@ async def check_tool_surface() -> list[dict[str, str]]:
 async def check_retrieval(query: str) -> list[dict[str, Any]]:
     from kg_mcp.config import (
         allowed_groups,
+        existing_group_files,
         load_config,
         per_group_ladybug,
         settings_for_group,
     )
-    from kg_mcp.retrieval import current_edges
+    from kg_mcp.queries import collect, search_facts
+    from kg_mcp.retrieval import current_edge
     from kg_mcp.runtime import bounded, build_graphiti
 
     settings = load_config()
     if per_group_ladybug(settings):
         # Probe the first group that has a file; every group file has the same schema.
-        existing = [
-            group
-            for group in settings.graph.groups
-            if Path(settings.database.ladybug.path_for(group)).exists()
-        ]
+        existing = existing_group_files(settings)
         if not existing:
             return [_check("retrieval", WARN, "no group file exists yet; nothing to search")]
         settings = settings_for_group(settings, existing[0])
@@ -80,10 +76,9 @@ async def check_retrieval(query: str) -> list[dict[str, Any]]:
     try:
         groups = allowed_groups(None, settings)
         try:
-            candidates = await bounded(
-                graph.search(query, group_ids=groups, num_results=10), timeout, "search"
+            facts, _ = await bounded(
+                search_facts(graph, settings, query, groups, 10), timeout, "search"
             )
-            facts, _ = current_edges(list(candidates), include_invalidated=False)
         except Exception as exc:
             return [_check("retrieval", FAIL, f"search raised: {exc}")]
         if facts:
@@ -98,33 +93,19 @@ async def check_retrieval(query: str) -> list[dict[str, Any]]:
         try:
             from graphiti_core.edges import EntityEdge
 
-            drivers = (
-                [graph.driver.clone(database=group) for group in settings.graph.groups]
-                if settings.database.provider == "falkordb"
-                else [graph.driver]
-            )
-            invalidated = []
-            for driver in drivers:
-                edges = await EntityEdge.get_by_group_ids(driver, settings.graph.groups) or []
-                now = datetime.now(timezone.utc)
-                invalidated.extend(
-                    edge
-                    for edge in edges
-                    if edge.invalid_at is not None and edge.invalid_at <= now
-                )
+            fetch = EntityEdge.get_by_group_ids
+            edges = await collect(graph, settings, settings.graph.groups, fetch)
+            invalidated = [edge for edge in edges if not current_edge(edge)]
             if not invalidated:
                 results.append(
                     _check("invalidation", WARN, "no superseded facts present to check")
                 )
             else:
                 sample = invalidated[0]
-                candidates = await bounded(
-                    graph.search(sample.fact, group_ids=groups, num_results=10),
-                    timeout,
-                    "search",
+                current, _ = await bounded(
+                    search_facts(graph, settings, sample.fact, groups, 10), timeout, "search"
                 )
-                current, _ = current_edges(list(candidates), include_invalidated=False)
-                leaked = any(item.uuid == sample.uuid for item in current)
+                leaked = any(item.uuid == sample.uuid for item, _ in current)
                 results.append(
                     _check(
                         "invalidation",

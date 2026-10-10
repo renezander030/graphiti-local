@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from kg_mcp.output import CommandError
 from kg_mcp.workspace import add_proposal, pending_for
 
 
@@ -31,5 +32,5 @@ def test_proposal_is_pending_and_append_only(configured_workspace: Path):
 
 
 def test_revision_requires_superseded_fact(configured_workspace: Path):
-    with pytest.raises(SystemExit, match="requires --supersedes"):
+    with pytest.raises(CommandError, match="requires --supersedes"):
         add_proposal("example", "Correction", operation="revise")

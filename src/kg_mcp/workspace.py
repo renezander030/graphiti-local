@@ -6,8 +6,8 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -25,9 +25,6 @@ from kg_mcp.output import (
 
 FACT_TYPES = ("belief", "source-fact", "action-record", "live-finding")
 OPERATIONS = ("assert", "revise", "invalidate")
-# Must accept every name GraphConfig accepts, or a legally configured group could be
-# declared in config and still be unproposable.
-DOMAIN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 # Clock skew between the proposing machine and this one.
 FUTURE_TOLERANCE = timedelta(minutes=5)
 
@@ -38,12 +35,6 @@ def workspace_dir() -> Path:
     override = os.environ.get("KG_WORKSPACE_DIR")
     configured = load_config().graph.workspace_dir
     return Path(override or configured).expanduser().resolve()
-
-
-def _workspace_settings():
-    from kg_mcp.config import load_config
-
-    return load_config().workspace
 
 
 def _path(name: str) -> Path:
@@ -79,16 +70,22 @@ def _write(name: str, items: list[dict]) -> None:
     os.replace(temporary, target)
 
 
-def _append(name: str, item: dict) -> None:
+def _append(name: str, item: dict, *, sort_keys: bool = False) -> None:
     directory = workspace_dir()
     directory.mkdir(parents=True, exist_ok=True)
     with _path(name).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+        handle.write(json.dumps(item, ensure_ascii=False, sort_keys=sort_keys) + "\n")
 
 
 def _lock() -> FileLock:
     workspace_dir().mkdir(parents=True, exist_ok=True)
     return FileLock(str(_path(".lock")))
+
+
+def append_locked(name: str, item: dict, *, sort_keys: bool = False) -> None:
+    """Append one JSON line to a workspace file under the shared workspace lock."""
+    with _lock():
+        _append(name, item, sort_keys=sort_keys)
 
 
 def pending_for(groups: list[str] | None = None) -> list[dict]:
@@ -150,36 +147,57 @@ def _check_fact(domain: str, fact: str, *, supersedes_rejection: str, settings) 
         )
 
 
-def _new_item(
+def file_facts(
     domain: str,
+    facts: list[str],
     *,
-    fact_type: str,
-    provenance: str,
-    source: str,
-    link: str,
-    valid_at: str,
-    learned_at: str,
-    supersedes_rejection: str,
-    texts: list[str],
+    operation: str = "assert",
+    supersedes: str = "",
+    fact_type: str = "belief",
+    provenance: str = "",
+    source: str = "",
+    link: str = "",
+    valid_at: str = "",
+    learned_at: str = "",
+    supersedes_rejection: str = "",
 ) -> dict:
-    """Validate everything a proposal and a bundle share, and return the base record."""
-    if not DOMAIN_PATTERN.fullmatch(domain):
-        raise SystemExit("domain must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-    if fact_type not in FACT_TYPES:
-        raise SystemExit(f"fact type must be one of: {', '.join(FACT_TYPES)}")
+    """Gate and queue one reviewable item: one fact, or several facts from one source.
+
+    Every refusal is a ``CommandError`` carrying the exit code a caller should use.
+    """
+    from kg_mcp.config import allowed_groups, load_config
+
+    config = load_config()
+    try:
+        allowed_groups(domain, config)
+    except ValueError as exc:
+        raise CommandError(str(exc), code=EXIT_REJECTED) from exc
+    facts = [fact.strip() for fact in facts if fact.strip()]
     provenance, source, link = provenance.strip(), source.strip(), link.strip()
-    shapes = secret_shapes(*texts, provenance, source, link)
+    supersedes, supersedes_rejection = supersedes.strip(), supersedes_rejection.strip()
+    settings = config.workspace
+    for refused, message in (
+        (fact_type not in FACT_TYPES, f"fact type must be one of: {', '.join(FACT_TYPES)}"),
+        (operation not in OPERATIONS, f"operation must be one of: {', '.join(OPERATIONS)}"),
+        (not facts, "fact text must not be empty"),
+        (operation != "assert" and not supersedes, f"{operation} requires --supersedes"),
+        (
+            len(facts) > 1 and not (provenance or source or link),
+            "a bundle names the one source its facts come from: --provenance, --source or --link",
+        ),
+        (
+            settings.require_source and not (source and link),
+            "workspace.require_source is set: name the source system with --source and "
+            "the record with --link",
+        ),
+    ):
+        if refused:
+            raise CommandError(message, code=EXIT_REJECTED)
+    shapes = secret_shapes(*facts, supersedes, provenance, source, link)
     if shapes:
         raise CommandError(
             f"proposal carries a {', '.join(shapes)} shape; state the fact without the value",
             code=EXIT_SECRET_SHAPED,
-        )
-    settings = _workspace_settings()
-    if settings.require_source and not (source and link):
-        raise CommandError(
-            "workspace.require_source is set: name the source system with --source and "
-            "the record with --link",
-            code=EXIT_REJECTED,
         )
     item: dict[str, Any] = {
         "id": "proposal-" + uuid.uuid4().hex[:12],
@@ -196,143 +214,73 @@ def _new_item(
         item["valid_at"] = _timestamp(valid_at, "--valid-at")
     if learned_at.strip():
         item["learned_at"] = _timestamp(learned_at, "--learned-at")
-    if supersedes_rejection.strip():
-        item["supersedes_rejection"] = supersedes_rejection.strip()
-    return item
-
-
-def add_proposal(
-    domain: str,
-    text: str,
-    *,
-    fact_type: str = "belief",
-    provenance: str = "",
-    operation: str = "assert",
-    supersedes: str = "",
-    valid_at: str = "",
-    learned_at: str = "",
-    source: str = "",
-    link: str = "",
-    supersedes_rejection: str = "",
-) -> dict:
-    if operation not in OPERATIONS:
-        raise SystemExit(f"operation must be one of: {', '.join(OPERATIONS)}")
-    text = text.strip()
-    if not text:
-        raise SystemExit("fact text must not be empty")
-    if operation in ("revise", "invalidate") and not supersedes.strip():
-        raise SystemExit(f"{operation} requires --supersedes")
-    item = _new_item(
-        domain,
-        fact_type=fact_type,
-        provenance=provenance,
-        source=source,
-        link=link,
-        valid_at=valid_at,
-        learned_at=learned_at,
-        supersedes_rejection=supersedes_rejection,
-        texts=[text, supersedes],
-    )
-    _check_fact(
-        domain,
-        text,
-        supersedes_rejection=supersedes_rejection.strip(),
-        settings=_workspace_settings(),
-    )
+    if supersedes_rejection:
+        item["supersedes_rejection"] = supersedes_rejection
+    for fact in facts:
+        _check_fact(domain, fact, supersedes_rejection=supersedes_rejection, settings=settings)
     item.update(
         operation=operation,
-        text=text,
-        supersedes=supersedes.strip(),
-        status="pending",
-    )
-    with _lock():
-        _append("pending.jsonl", item)
-    return item
-
-
-def add_bundle(
-    domain: str,
-    facts: list[str],
-    *,
-    fact_type: str = "belief",
-    provenance: str = "",
-    source: str = "",
-    link: str = "",
-    valid_at: str = "",
-    learned_at: str = "",
-    supersedes_rejection: str = "",
-) -> dict:
-    """One reviewed item that asserts several facts from one source."""
-    facts = [fact.strip() for fact in facts if fact.strip()]
-    if len(facts) < 2:
-        raise CommandError("a bundle needs at least two --fact values", code=EXIT_REJECTED)
-    if not (provenance.strip() or source.strip() or link.strip()):
-        raise CommandError(
-            "a bundle names the one source its facts come from: --provenance, --source or --link",
-            code=EXIT_REJECTED,
-        )
-    item = _new_item(
-        domain,
-        fact_type=fact_type,
-        provenance=provenance,
-        source=source,
-        link=link,
-        valid_at=valid_at,
-        learned_at=learned_at,
-        supersedes_rejection=supersedes_rejection,
-        texts=facts,
-    )
-    settings = _workspace_settings()
-    for fact in facts:
-        _check_fact(
-            domain, fact, supersedes_rejection=supersedes_rejection.strip(), settings=settings
-        )
-    item.update(
-        operation="assert",
         text=" | ".join(facts),
-        facts=facts,
-        supersedes="",
+        **({"facts": facts} if len(facts) > 1 else {}),
+        supersedes=supersedes,
         status="pending",
     )
-    with _lock():
-        _append("pending.jsonl", item)
+    append_locked("pending.jsonl", item)
     return item
+
+
+def add_proposal(domain: str, text: str, **fields: Any) -> dict:
+    """One fact; ``fields`` are the keyword arguments of ``file_facts``."""
+    return file_facts(domain, [text], **fields)
+
+
+def add_bundle(domain: str, facts: list[str], **fields: Any) -> dict:
+    """Several facts from one source, reviewed as one item; ``fields`` as ``file_facts``."""
+    if len([fact for fact in facts if fact.strip()]) < 2:
+        raise CommandError("a bundle needs at least two --fact values", code=EXIT_REJECTED)
+    return file_facts(domain, facts, **fields)
+
+
+def _rewrite(change: Callable[[dict], bool]) -> None:
+    """Under the lock, let ``change`` edit each queued item; True moves it to the archive."""
+    with _lock():
+        remaining = []
+        for item in _read():
+            if change(item):
+                _append("archive.jsonl", item)
+            else:
+                remaining.append(item)
+        _write("pending.jsonl", remaining)
 
 
 def _human_set_status(ids: set[str], status: str, *, reason: str = "") -> dict[str, Any]:
     """Approve or reject. An approval is bound to the digest of the content it saw."""
-    with _lock():
-        items = _read()
-        changed, rejected, remaining, decided = 0, [], [], set()
-        now = datetime.now(timezone.utc).isoformat()
-        for item in items:
-            if item.get("id") not in ids:
-                remaining.append(item)
-                continue
-            decidable = item.get("status") == "pending" or (
+    decided: set[str] = set()
+    now = datetime.now(timezone.utc).isoformat()
+
+    def decide(item: dict) -> bool:
+        decidable = item.get("id") in ids and (
+            item.get("status") == "pending"
+            or (
                 status == "approved"
                 and item.get("status") == "approved"
                 and "approved_digest" not in item
             )
-            if not decidable:
-                remaining.append(item)
-                continue
-            item["status"] = status
-            item["decided_at"] = now
-            decided.add(item["id"])
-            changed += 1
-            if status == "approved":
-                item["approved_digest"] = content_digest(item)
-                remaining.append(item)
-            else:
-                if reason.strip():
-                    item["reason"] = reason.strip()
-                rejected.append(item)
+        )
+        if not decidable:
+            return False
+        item.update(status=status, decided_at=now)
+        decided.add(item["id"])
+        if status == "approved":
+            item["approved_digest"] = content_digest(item)
+            return False
+        if reason.strip():
+            item["reason"] = reason.strip()
         # Rejections leave the queue for the archive, where the rejection gate reads them.
-        for item in rejected:
-            _append("archive.jsonl", item)
-        _write("pending.jsonl", remaining)
-    return {"status": status, "changed": changed, "unknown": sorted(ids - decided)}
+        return True
+
+    _rewrite(decide)
+    return {"status": status, "changed": len(decided), "unknown": sorted(ids - decided)}
 
 
 def _episode_body(item: dict, text: str | None = None) -> str:
@@ -371,26 +319,18 @@ def _binding_error(item: dict) -> str | None:
     return None
 
 
-def _update(item_id: str, **fields: Any) -> None:
-    with _lock():
-        items = _read()
-        for queued in items:
-            if queued.get("id") == item_id:
-                queued.update(fields)
-        _write("pending.jsonl", items)
+def _update(item_id: str, *, archive: bool = False, **fields: Any) -> None:
+    """Change one queued item; ``archive`` moves it from the queue to the archive."""
 
+    def change(item: dict) -> bool:
+        if item.get("id") != item_id:
+            return False
+        item.update(fields)
+        if archive:
+            item["drained_at"] = datetime.now(timezone.utc).isoformat()
+        return archive
 
-def _archive(item_id: str, **fields: Any) -> None:
-    with _lock():
-        remaining = []
-        for queued in _read():
-            if queued.get("id") == item_id:
-                queued.update(fields)
-                queued["drained_at"] = datetime.now(timezone.utc).isoformat()
-                _append("archive.jsonl", queued)
-            else:
-                remaining.append(queued)
-        _write("pending.jsonl", remaining)
+    _rewrite(change)
 
 
 async def drain(*, apply: bool) -> dict:
@@ -457,13 +397,13 @@ async def drain(*, apply: bool) -> dict:
             if len(landed) < len(texts):
                 _update(item["id"], landed=landed, episodes=episodes)
         if len(landed) == len(texts):
-            _archive(item["id"], landed=landed, episodes=episodes)
+            _update(item["id"], archive=True, landed=landed, episodes=episodes)
             completed += 1
     return {"applied": True, "ingested": completed, "failed": failures, "planned": []}
 
 
 def main() -> None:
-    from kg_mcp.output import emit, fail
+    from kg_mcp.output import emit, refusals
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-H", "--human", action="store_true")
@@ -520,14 +460,8 @@ def main() -> None:
             raise SystemExit(EXIT_REJECTED)
         return
 
-    try:
+    with refusals(as_json=as_json):
         result = asyncio.run(drain(apply=args.apply))
-    except ValueError as exc:  # a refused write, e.g. the embedder changed since the last one
-        fail(str(exc), code=2, as_json=as_json)
-        return
-    except (FileNotFoundError, RuntimeError) as exc:
-        fail(str(exc), as_json=as_json)
-        return
 
     def drain_human() -> list[str]:
         if not result["applied"]:

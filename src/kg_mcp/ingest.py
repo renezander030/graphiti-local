@@ -270,36 +270,16 @@ def completed_keys() -> set[str]:
 
 
 def _record_completed(key: str, domain: str, name: str) -> None:
-    from filelock import FileLock
+    from kg_mcp.workspace import append_locked
 
-    from kg_mcp.workspace import workspace_dir
-
-    directory = workspace_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    entry = {
-        "key": key,
-        "domain": domain,
-        "name": name,
-        "ingested_at": datetime.now(timezone.utc).isoformat(),
-    }
-    with (
-        FileLock(str(directory / ".lock")),
-        (directory / LEDGER).open("a", encoding="utf-8") as handle,
-    ):
-        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    ingested_at = datetime.now(timezone.utc).isoformat()
+    append_locked(LEDGER, {"key": key, "domain": domain, "name": name, "ingested_at": ingested_at})
 
 
 def _record_event(filename: str, entry: dict[str, Any]) -> None:
-    from filelock import FileLock
+    from kg_mcp.workspace import append_locked
 
-    from kg_mcp.workspace import workspace_dir
-
-    directory = workspace_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    with FileLock(str(directory / ".lock")), (directory / filename).open(
-        "a", encoding="utf-8"
-    ) as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    append_locked(filename, entry, sort_keys=True)
 
 
 def _retryable(exc: Exception) -> bool:
@@ -438,102 +418,86 @@ async def ingest_records(
 
     from graphiti_core.nodes import EpisodeType
 
-    from kg_mcp import fingerprint
-    from kg_mcp.runtime import build_graphiti
-
-    # Vectors from two embedders in one graph rank wrongly and say nothing; refuse before
-    # the first write rather than after.
-    if track_fingerprint:
-        drift = fingerprint.drift(settings)
-        if drift:
-            raise ValueError(drift)
-
-    from kg_mcp.write_lock import graph_writer_lock
+    from kg_mcp.runtime import writing
 
     ingested, failures, receipts, interrupted = 0, [], [], False
-    with graph_writer_lock(settings):
-        graph = build_graphiti(settings, read_only=False)
-        try:
-            with _stop_on_signal() as stop:
-                await graph.build_indices_and_constraints()
-                for record, domain, key in planned:
-                    if stop["requested"]:
-                        interrupted = True
+    async with writing(settings, track_fingerprint=track_fingerprint) as session:
+        graph = session.graph
+        with _stop_on_signal() as stop:
+            for record, domain, key in planned:
+                if stop["requested"]:
+                    interrupted = True
+                    break
+                result = None
+                attempts = 0
+                last_error: Exception | None = None
+                while attempts < settings.graph.ingest_max_attempts:
+                    attempts += 1
+                    try:
+                        result = await graph.add_episode(
+                            name=str(record["name"]).strip(),
+                            episode_body=str(record["body"]).strip(),
+                            source=EpisodeType.text,
+                            source_description=str(
+                                record.get("provenance") or "Graphiti Local import"
+                            ),
+                            reference_time=_reference_time(record.get("valid_at")),
+                            group_id=(
+                                None if settings.database.provider == "ladybug" else domain
+                            ),
+                            uuid=episode_uuid(key),
+                        )
+                        last_error = None
                         break
-                    result = None
-                    attempts = 0
-                    last_error: Exception | None = None
-                    while attempts < settings.graph.ingest_max_attempts:
-                        attempts += 1
-                        try:
-                            result = await graph.add_episode(
-                                name=str(record["name"]).strip(),
-                                episode_body=str(record["body"]).strip(),
-                                source=EpisodeType.text,
-                                source_description=str(
-                                    record.get("provenance") or "Graphiti Local import"
-                                ),
-                                reference_time=_reference_time(record.get("valid_at")),
-                                group_id=(
-                                    None if settings.database.provider == "ladybug" else domain
-                                ),
-                                uuid=episode_uuid(key),
-                            )
-                            last_error = None
+                    except Exception as exc:  # one bad episode must not cost the batch
+                        last_error = exc
+                        exhausted = attempts >= settings.graph.ingest_max_attempts
+                        if not _retryable(exc) or exhausted:
                             break
-                        except Exception as exc:  # one bad episode must not cost the batch
-                            last_error = exc
-                            exhausted = attempts >= settings.graph.ingest_max_attempts
-                            if not _retryable(exc) or exhausted:
-                                break
-                            delay = _retry_delay(
-                                settings.graph.ingest_retry_base_seconds, attempts, key
-                            )
-                            if delay:
-                                await asyncio.sleep(delay)
-                    if last_error is not None:
-                        exc = last_error
-                        detail = str(exc).strip() or f"{type(exc).__name__} (no message)"
-                        failure = {
-                            "key": key,
-                            "episode_uuid": episode_uuid(key),
-                            "name": record["name"],
-                            "domain": domain,
-                            "operation": "extract episode",
-                            "error_type": type(exc).__name__,
-                            "error": detail,
-                            "attempts": attempts,
-                            "retryable": _retryable(exc),
-                            "failed_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                        failures.append(failure)
-                        if ledger:
-                            _record_event(FAILURES, failure)
-                        if fail_fast:
-                            break
-                        continue
-                    if ledger:
-                        _record_completed(key, domain, str(record["name"]).strip())
-                    receipt = {
+                        delay = _retry_delay(
+                            settings.graph.ingest_retry_base_seconds, attempts, key
+                        )
+                        if delay:
+                            await asyncio.sleep(delay)
+                if last_error is not None:
+                    exc = last_error
+                    detail = str(exc).strip() or f"{type(exc).__name__} (no message)"
+                    failure = {
                         "key": key,
-                        "episode_uuid": getattr(getattr(result, "episode", None), "uuid", None)
-                        or episode_uuid(key),
-                        "name": str(record["name"]).strip(),
+                        "episode_uuid": episode_uuid(key),
+                        "name": record["name"],
                         "domain": domain,
-                        "nodes": len(getattr(result, "nodes", []) or []),
-                        "edges": len(getattr(result, "edges", []) or []),
+                        "operation": "extract episode",
+                        "error_type": type(exc).__name__,
+                        "error": detail,
                         "attempts": attempts,
-                        "ingested_at": datetime.now(timezone.utc).isoformat(),
+                        "retryable": _retryable(exc),
+                        "failed_at": datetime.now(timezone.utc).isoformat(),
                     }
-                    receipts.append(receipt)
+                    failures.append(failure)
                     if ledger:
-                        _record_event(RECEIPTS, receipt)
-                    ingested += 1
-            if ingested and track_fingerprint:
-                fingerprint.record(settings)
-        finally:
-            # Always close: an embedded backend left with a partial write may refuse to reopen.
-            await graph.close()
+                        _record_event(FAILURES, failure)
+                    if fail_fast:
+                        break
+                    continue
+                if ledger:
+                    _record_completed(key, domain, str(record["name"]).strip())
+                receipt = {
+                    "key": key,
+                    "episode_uuid": getattr(getattr(result, "episode", None), "uuid", None)
+                    or episode_uuid(key),
+                    "name": str(record["name"]).strip(),
+                    "domain": domain,
+                    "nodes": len(getattr(result, "nodes", []) or []),
+                    "edges": len(getattr(result, "edges", []) or []),
+                    "attempts": attempts,
+                    "ingested_at": datetime.now(timezone.utc).isoformat(),
+                }
+                receipts.append(receipt)
+                if ledger:
+                    _record_event(RECEIPTS, receipt)
+                ingested += 1
+        session.wrote = bool(ingested)
     return {
         "applied": True,
         "ingested": ingested,
@@ -611,16 +575,15 @@ async def stage_extraction(
 
     decision_template = None
     if destination.exists():
-        from kg_mcp.review import create_decision_template
+        from kg_mcp.review import create_decision_template, default_approved_path
 
         decision_template = create_decision_template(destination)
 
     review_flags = ""
     if decision_template is not None:
-        approved = destination.with_suffix(destination.suffix + ".approved.jsonl")
         review_flags = (
             f" --review-decisions {shlex.quote(decision_template['output'])}"
-            f" --approved-output {shlex.quote(str(approved))}"
+            f" --approved-output {shlex.quote(str(default_approved_path(destination)))}"
         )
 
     return {
@@ -640,7 +603,7 @@ async def stage_extraction(
 
 
 def main() -> None:
-    from kg_mcp.output import emit, fail
+    from kg_mcp.output import emit, fail, refusals
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
@@ -714,31 +677,35 @@ def main() -> None:
     if args.approved_output and not args.review_decisions:
         fail("--approved-output requires --review-decisions", code=2, as_json=as_json)
         return
-    if args.review_output:
-        if args.apply or args.restore:
-            fail(
-                "--review-output cannot be combined with --apply or --restore",
-                code=2,
-                as_json=as_json,
-            )
-            return
-        try:
-            records = read_input(
-                args.input,
-                input_format=args.input_format,
-                domain=args.domain,
-                max_chars=args.max_chars,
-                skip_invalid=args.skip_invalid,
-            )
+    if args.review_output and (args.apply or args.restore):
+        refused = "--review-output cannot be combined with --apply or --restore"
+        fail(refused, code=2, as_json=as_json)
+        return
+    if args.restore:
+        _restore_main(args, as_json=as_json)
+        return
+    with refusals(as_json=as_json):
+        records = read_input(
+            args.input,
+            input_format=args.input_format,
+            domain=args.domain,
+            max_chars=args.max_chars,
+            skip_invalid=args.skip_invalid,
+        )
+        if args.review_output:
             result = asyncio.run(
                 stage_extraction(records, args.review_output, fail_fast=args.fail_fast)
             )
-        except ValueError as exc:
-            fail(str(exc), code=2, as_json=as_json)
-            return
-        except (FileNotFoundError, RuntimeError) as exc:
-            fail(str(exc), as_json=as_json)
-            return
+        else:
+            result = asyncio.run(
+                ingest_records(
+                    records,
+                    apply=args.apply,
+                    resume=not args.no_resume,
+                    fail_fast=args.fail_fast,
+                )
+            )
+    if args.review_output:
 
         def review_human() -> list[str]:
             snapshot = result["review_snapshot"]
@@ -761,31 +728,6 @@ def main() -> None:
         emit(result, human=review_human, as_json=as_json)
         if result["failed"]:
             raise SystemExit(1)
-        return
-    if args.restore:
-        _restore_main(args, as_json=as_json)
-        return
-    try:
-        records = read_input(
-            args.input,
-            input_format=args.input_format,
-            domain=args.domain,
-            max_chars=args.max_chars,
-            skip_invalid=args.skip_invalid,
-        )
-        result = asyncio.run(
-            ingest_records(
-                records,
-                apply=args.apply,
-                resume=not args.no_resume,
-                fail_fast=args.fail_fast,
-            )
-        )
-    except ValueError as exc:
-        fail(str(exc), code=2, as_json=as_json)
-        return
-    except (FileNotFoundError, RuntimeError) as exc:
-        fail(str(exc), as_json=as_json)
         return
     result["total"] = len(records)
     # A record can land and still yield nothing: the model extracted no fact from it.
@@ -825,10 +767,10 @@ def main() -> None:
 
 
 def _restore_main(args: argparse.Namespace, *, as_json: bool) -> None:
-    from kg_mcp.output import emit, fail
+    from kg_mcp.output import emit, refusals
     from kg_mcp.restore import human_lines, restore_snapshot
 
-    try:
+    with refusals(as_json=as_json):
         source = args.input
         review_receipt = None
         if args.review_decisions:
@@ -850,12 +792,6 @@ def _restore_main(args: argparse.Namespace, *, as_json: bool) -> None:
         )
         if review_receipt is not None:
             result["review_receipt"] = review_receipt
-    except ValueError as exc:
-        fail(str(exc), code=2, as_json=as_json)
-        return
-    except (FileNotFoundError, RuntimeError) as exc:
-        fail(str(exc), as_json=as_json)
-        return
     emit(result, human=lambda: human_lines(result), as_json=as_json)
     if result["failed"]:
         raise SystemExit(1)

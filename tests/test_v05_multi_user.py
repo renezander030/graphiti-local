@@ -411,3 +411,17 @@ def test_export_and_restore_move_facts_between_group_files(two_users: Settings, 
         "Bob keeps the invoice archive",
     ]
     assert _raw_facts(ladybug.path_for("alice")) == ["Alice keeps the invoice ledger"]
+
+
+def test_a_forbidden_group_is_refused_before_any_model_client_is_built(monkeypatch):
+    from kg_mcp import cli
+
+    def no_clients(*args, **kwargs):
+        raise AssertionError("the graph was opened for a refused group")
+
+    monkeypatch.setattr("kg_mcp.config.load_config", lambda: Settings())
+    monkeypatch.setattr("kg_mcp.cli.load_config", lambda: Settings())
+    monkeypatch.setattr("kg_mcp.runtime.build_graphiti", no_clients)
+    args = cli.parser().parse_args(["ask", "invoice", "nope", "--keyword"])
+    with pytest.raises(ValueError, match="not allowed by configuration: nope"):
+        asyncio.run(cli._dispatch(args))
