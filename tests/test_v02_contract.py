@@ -74,14 +74,21 @@ def test_accepted_proposal_queues_and_exits_zero(configured, capsys):
     assert (configured / "pending.jsonl").exists()
 
 
-def test_a_configured_group_name_is_always_proposable(configured):
-    """GraphConfig and the queue must accept the same names."""
-    from kg_mcp.config import GROUP_PATTERN
-    from kg_mcp.workspace import DOMAIN_PATTERN
+def test_a_configured_group_name_is_always_proposable(tmp_path, monkeypatch):
+    """Filing accepts exactly the configured groups, whatever names config allows."""
+    from kg_mcp.output import EXIT_REJECTED, CommandError
+    from kg_mcp.workspace import add_proposal
 
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"graph:\n  groups: [Example.v2, team-a, main_2]\n  workspace_dir: {tmp_path}\n"
+    )
+    monkeypatch.setenv("GRAPHITI_LOCAL_CONFIG", str(config))
     for name in ("Example.v2", "team-a", "main_2"):
-        assert GROUP_PATTERN.fullmatch(name)
-        assert DOMAIN_PATTERN.fullmatch(name), f"{name} is configurable but not proposable"
+        assert add_proposal(name, "A fact.")["domain"] == name
+    with pytest.raises(CommandError) as refused:
+        add_proposal("unconfigured", "A fact.")
+    assert refused.value.code == EXIT_REJECTED
 
 
 # --- item 4: JSON by default, human on request, failures on stderr ---

@@ -1,7 +1,7 @@
 """Deterministic checks a proposal passes before it can enter the review queue.
 
 Every check is pure: it reads text (and, for rejections, the archive the caller
-passes in) and returns what it found. ``workspace.add_proposal`` decides what a
+passes in) and returns what it found. ``workspace.file_facts`` decides what a
 finding means and which exit code a refusal carries.
 """
 

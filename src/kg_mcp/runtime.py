@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 
 from kg_mcp.config import Settings
@@ -223,3 +226,30 @@ def build_graphiti(settings: Settings, *, read_only: bool):
             **kwargs,
         )
     raise ValueError(f"unsupported database provider: {provider}")
+
+
+@asynccontextmanager
+async def writing(settings: Settings, *, track_fingerprint: bool = True) -> AsyncIterator[Any]:
+    """A write session: the graph under the writer lock, with its indexes in place.
+
+    Set ``session.wrote`` once something landed, so the embedder is recorded only then.
+    The graph is always closed: an embedded backend left mid-write may refuse to reopen.
+    """
+    from kg_mcp import fingerprint
+    from kg_mcp.write_lock import graph_writer_lock
+
+    # Vectors from two embedders in one graph rank wrongly and say nothing; refuse before
+    # the first write rather than after.
+    drift = fingerprint.drift(settings) if track_fingerprint else None
+    if drift:
+        raise ValueError(drift)
+    with graph_writer_lock(settings):
+        graph = build_graphiti(settings, read_only=False)
+        try:
+            await graph.build_indices_and_constraints()
+            session = SimpleNamespace(graph=graph, wrote=False)
+            yield session
+            if session.wrote and track_fingerprint:
+                fingerprint.record(settings)
+        finally:
+            await graph.close()

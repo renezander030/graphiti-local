@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Filing refuses a fact for a group outside `graph.groups` in the library too
+  (`workspace.file_facts`, `add_proposal`, `add_bundle`), not only in `kg propose`.
+- Filing refusals are all JSON errors with exit `2`: an empty fact and `--op revise`
+  or `invalidate` without `--supersedes` used to print plain text and exit `1`.
+- `kg ask`, `nodes`, `episodes`, `export` and `duplicates` refuse a group outside the
+  allow-list before building any model client, so the refusal no longer needs an API key.
+- `kg-ingest` and `kg-workspace drain` report a timeout (exit `3`) or a refusal with its
+  exit code instead of a traceback.
+- On Neo4j or a single Ladybug file, a missing edge reads `edge not found: <uuid>`, as on
+  the other backends.
+
+### Fixed
+
+- `kg verify` checks invalidation on a single Ladybug file. It used to find no superseded
+  facts there (ingestion writes the empty group) and then failed comparing timestamps.
+
 ## 0.7.0
 
 This release makes the review queue land exactly what a reviewer approved, dated by

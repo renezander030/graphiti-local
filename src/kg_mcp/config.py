@@ -305,6 +305,12 @@ def per_group_ladybug(settings: Settings) -> bool:
     return database.provider == "ladybug" and database.ladybug.layout == "per-group"
 
 
+def existing_group_files(settings: Settings) -> list[str]:
+    """The configured groups whose per-group Ladybug file has been created."""
+    ladybug = settings.database.ladybug
+    return [group for group in settings.graph.groups if Path(ladybug.path_for(group)).exists()]
+
+
 def settings_for_group(settings: Settings, group: str) -> Settings:
     """A view of ``settings`` bound to the one file that holds ``group``.
 

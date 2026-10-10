@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 EXIT_ERROR = 1
@@ -53,3 +54,18 @@ def fail(message: str, *, code: int = EXIT_ERROR, as_json: bool = True) -> None:
     else:
         print(f"error: {message}", file=sys.stderr)
     raise SystemExit(code)
+
+
+@contextmanager
+def refusals(*, as_json: bool = True) -> Iterator[None]:
+    """Turn a refused call into its message and exit code instead of a traceback."""
+    try:
+        yield
+    except CommandError as exc:
+        fail(str(exc), code=exc.code, as_json=as_json)
+    except ValueError as exc:
+        fail(str(exc), code=EXIT_REJECTED, as_json=as_json)
+    except TimeoutError as exc:
+        fail(str(exc), code=EXIT_TIMEOUT, as_json=as_json)
+    except (FileNotFoundError, RuntimeError) as exc:
+        fail(str(exc), as_json=as_json)

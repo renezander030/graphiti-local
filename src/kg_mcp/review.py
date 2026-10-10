@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kg_mcp.export import _atomic_snapshot, _json_line
+from kg_mcp.export import _atomic_snapshot, json_rows, write_snapshot
 from kg_mcp.restore import read_snapshot
 
 REVIEW_FORMAT_VERSION = 1
@@ -59,15 +58,7 @@ def create_decision_template(snapshot: Path, output: Path | None = None) -> dict
 def _read_decisions(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     header: dict[str, Any] | None = None
     rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
-        if not isinstance(item, dict):
-            raise ValueError(f"{path}:{line_number}: each line must be an object")
+    for line_number, _, item in json_rows(path):
         if header is None:
             if item.get("kind") != "review":
                 raise ValueError(f"{path}: not a review decision file")
@@ -140,14 +131,10 @@ def apply_review_decisions(
             ]
         selected.append(record)
 
-    record_bytes = [_json_line(record) for record in selected]
-    digest = hashlib.sha256(b"".join(record_bytes)).hexdigest()
     decisions_digest = hashlib.sha256(decisions.read_bytes()).hexdigest()
     promotion_header = dict(snapshot_header)
     promotion_header.update(
         created_at=datetime.now(timezone.utc).isoformat(),
-        record_count=len(selected),
-        sha256=digest,
         review={
             "source_sha256": snapshot_header.get("sha256"),
             "decisions_sha256": decisions_digest,
@@ -156,7 +143,7 @@ def apply_review_decisions(
         },
     )
     destination = output or default_approved_path(snapshot)
-    _atomic_snapshot(destination, promotion_header, selected)
+    digest = write_snapshot(destination, promotion_header, selected)
     return {
         "output": str(destination),
         "source_sha256": snapshot_header.get("sha256"),

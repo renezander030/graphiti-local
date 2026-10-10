@@ -12,12 +12,10 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-from kg_mcp import __version__
+from kg_mcp import __version__, queries
 from kg_mcp.config import allowed_groups, load_config
-from kg_mcp.output import EXIT_REJECTED, EXIT_TIMEOUT, CommandError, emit, fail
+from kg_mcp.output import CommandError, emit, refusals
 from kg_mcp.runtime import bounded
-
-READ_COMMANDS = {"ask", "nodes", "episodes", "edge", "status", "export", "duplicates"}
 
 
 def _pending_items(groups: list[str] | None) -> list[dict[str, Any]]:
@@ -51,13 +49,6 @@ async def _pending_command(args: argparse.Namespace) -> dict[str, Any]:
 def _propose_command(args: argparse.Namespace) -> dict[str, Any]:
     from kg_mcp.workspace import add_proposal
 
-    settings = load_config()
-    # Reads have always enforced the allow-list; the write path used to skip it, so a
-    # fact addressed to an unconfigured domain queued silently and exited 0.
-    try:
-        allowed_groups(args.group, settings)
-    except ValueError as exc:
-        raise CommandError(str(exc), code=EXIT_REJECTED) from exc
     common = {
         "fact_type": args.type,
         "provenance": args.provenance,
@@ -99,47 +90,6 @@ def _doctor_command(args: argparse.Namespace) -> dict[str, Any]:
     return {"status": worst_status(results), "checks": results}
 
 
-async def _edge_search(
-    graph: Any,
-    args: argparse.Namespace,
-    groups: list[str] | None,
-    settings: Any,
-) -> tuple[list[tuple[Any, float]], dict[str, Any]]:
-    """Return current, identity-safe reranked edges."""
-    from kg_mcp.retrieval import (
-        candidate_limit,
-        compatible_query,
-        current_edges,
-        keyword_edge_search_config,
-        rerank_edges,
-        retrieval_stats,
-    )
-
-    query = compatible_query(args.query, settings)
-    candidates = candidate_limit(args.limit, settings)
-    if not getattr(args, "keyword", False):
-        edges = await graph.search(query, group_ids=groups, num_results=candidates)
-    else:
-        results = await graph.search_(
-            query,
-            config=keyword_edge_search_config(candidates),
-            group_ids=groups,
-        )
-        edges = results.edges[:candidates]
-    current, suppressed = current_edges(
-        list(edges), include_invalidated=getattr(args, "history", False)
-    )
-    ranked = await rerank_edges(graph, query, current, settings, args.limit)
-    return ranked, retrieval_stats(
-        requested=args.limit,
-        candidate_ceiling=candidates,
-        candidates_seen=len(edges),
-        eligible=len(current),
-        returned=len(ranked),
-        suppressed=suppressed,
-    )
-
-
 async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
     from kg_mcp.config import per_group_ladybug, settings_for_group, single_group
 
@@ -158,15 +108,9 @@ async def _graph_command(args: argparse.Namespace) -> dict[str, Any]:
 
 async def _each_group_file(args: argparse.Namespace, settings: Any) -> dict[str, Any]:
     """``status`` and ``edge`` visit every configured group's file that exists."""
-    from pathlib import Path
+    from kg_mcp.config import existing_group_files, settings_for_group
 
-    from kg_mcp.config import settings_for_group
-
-    existing = [
-        group
-        for group in settings.graph.groups
-        if Path(settings.database.ladybug.path_for(group)).exists()
-    ]
+    existing = existing_group_files(settings)
     if args.command == "status":
         counts = {group: 0 for group in settings.graph.groups}
         for group in existing:
@@ -188,12 +132,21 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
     from kg_mcp.runtime import build_graphiti
 
     timeout = settings.graph.query_timeout_seconds
+    # Refuse a group outside the allow-list before any model client is built.
+    groups = allowed_groups(getattr(args, "groups", None), settings)
     graph = build_graphiti(settings, read_only=True)
     try:
         if args.command == "ask":
-            groups = allowed_groups(args.groups, settings)
             results, retrieval = await bounded(
-                _edge_search(graph, args, groups, settings),
+                queries.search_facts(
+                    graph,
+                    settings,
+                    args.query,
+                    groups,
+                    args.limit,
+                    keyword=getattr(args, "keyword", False),
+                    include_invalidated=getattr(args, "history", False),
+                ),
                 timeout,
                 "ask",
             )
@@ -221,46 +174,22 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                 "pending": _pending_items(groups or settings.graph.groups),
             }
         if args.command == "nodes":
-            groups = allowed_groups(args.groups, settings)
-            from kg_mcp.retrieval import (
-                candidate_limit,
-                compatible_query,
-                keyword_node_search_config,
-                retrieval_stats,
-            )
-
-            candidates = candidate_limit(args.limit, settings)
-            query = compatible_query(args.query, settings)
-            from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
-
-            node_config = (
-                keyword_node_search_config(candidates)
-                if args.keyword
-                else NODE_HYBRID_SEARCH_RRF.model_copy(update={"limit": candidates})
-            )
-            result = await bounded(
-                graph.search_(query, config=node_config, group_ids=groups),
+            nodes, retrieval = await bounded(
+                queries.search_nodes(
+                    graph, settings, args.query, groups, args.limit, keyword=args.keyword
+                ),
                 timeout,
                 "nodes",
             )
-            nodes = list(result.nodes or [])
-            returned = nodes[: args.limit]
             return {
                 "query": args.query,
                 "nodes": [
                     {"name": node.name, "group_id": node.group_id, "uuid": node.uuid}
-                    for node in returned
+                    for node in nodes
                 ],
-                "retrieval": retrieval_stats(
-                    requested=args.limit,
-                    candidate_ceiling=candidates,
-                    candidates_seen=len(nodes),
-                    eligible=len(nodes),
-                    returned=len(returned),
-                ),
+                "retrieval": retrieval,
             }
         if args.command == "episodes":
-            groups = allowed_groups(args.groups, settings)
             episodes = await bounded(
                 graph.retrieve_episodes(
                     reference_time=datetime.now(timezone.utc),
@@ -283,22 +212,9 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                 ]
             }
         if args.command == "edge":
-            from graphiti_core.edges import EntityEdge
-
-            edge = None
-            drivers = [graph.driver]
-            if settings.database.provider == "falkordb":
-                drivers = [graph.driver.clone(database=group) for group in settings.graph.groups]
-            found_on = None
-            for driver in drivers:
-                try:
-                    edge = await bounded(EntityEdge.get_by_uuid(driver, args.uuid), timeout, "edge")
-                    found_on = driver
-                    break
-                except TimeoutError:
-                    raise
-                except Exception:
-                    continue
+            edge, found_on = await queries.find_edge(
+                queries.graph_drivers(graph, settings), args.uuid, timeout, "edge"
+            )
             if edge is None:
                 raise CommandError(f"edge not found: {args.uuid}")
             return {
@@ -312,34 +228,28 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                 "episodes": await _episode_sources(found_on, edge.episodes or [], timeout),
             }
         if args.command == "status":
-            provider = settings.database.provider
-            groups = []
-            for group in settings.graph.groups:
-                driver = (
-                    graph.driver.clone(database=group) if provider == "falkordb" else graph.driver
-                )
-                rows, _, _ = await bounded(
-                    driver.execute_query("MATCH (n) RETURN count(n) AS count"),
-                    timeout,
-                    "status",
-                )
-                groups.append({"group": group, "nodes": rows[0]["count"]})
-                if provider != "falkordb":
-                    break
-            return {"provider": provider, "groups": groups}
+            # One driver per group on FalkorDB; elsewhere one count under the first group.
+            drivers = queries.graph_drivers(graph, settings)
+            return {
+                "provider": settings.database.provider,
+                "groups": [
+                    {"group": group, "nodes": await queries.count_nodes(driver, timeout, "status")}
+                    for group, driver in zip(settings.graph.groups, drivers, strict=False)
+                ],
+            }
         if args.command == "export":
             from kg_mcp.export import export_graph
 
-            groups = allowed_groups(args.groups, settings) or settings.graph.groups
             return await bounded(
-                export_graph(graph, settings, groups, output=args.output), timeout, "export"
+                export_graph(graph, settings, groups or settings.graph.groups, output=args.output),
+                timeout,
+                "export",
             )
         if args.command == "duplicates":
             from kg_mcp.duplicates import find_duplicates
 
-            groups = allowed_groups(args.groups, settings) or settings.graph.groups
             return await bounded(
-                find_duplicates(graph, settings, groups, limit=args.limit),
+                find_duplicates(graph, settings, groups or settings.graph.groups, limit=args.limit),
                 timeout,
                 "duplicates",
             )
@@ -461,6 +371,8 @@ def _core_version() -> str:
 
 
 def parser() -> argparse.ArgumentParser:
+    from kg_mcp.workspace import FACT_TYPES, OPERATIONS
+
     # The reader flag is accepted before and after the subcommand. The subcommand copy
     # suppresses its default so it cannot overwrite a value given up front.
     common = argparse.ArgumentParser(add_help=False)
@@ -527,7 +439,7 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--fact", action="append", required=True, default=[])
         command.add_argument(
             "--type",
-            choices=("belief", "source-fact", "action-record", "live-finding"),
+            choices=FACT_TYPES,
             default="belief",
         )
         command.add_argument("--provenance", "--prov", default="")
@@ -547,7 +459,7 @@ def parser() -> argparse.ArgumentParser:
     propose.add_argument(
         "--operation",
         "--op",
-        choices=("assert", "revise", "invalidate"),
+        choices=OPERATIONS,
         default="assert",
     )
     propose.add_argument("--supersedes", default="")
@@ -580,20 +492,8 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = parser().parse_args()
     as_json = not getattr(args, "human", False)
-    try:
+    with refusals(as_json=as_json):
         payload = asyncio.run(_dispatch(args))
-    except CommandError as exc:
-        fail(str(exc), code=exc.code, as_json=as_json)
-        return
-    except ValueError as exc:
-        fail(str(exc), code=EXIT_REJECTED, as_json=as_json)
-        return
-    except TimeoutError as exc:
-        fail(str(exc), code=EXIT_TIMEOUT, as_json=as_json)
-        return
-    except (FileNotFoundError, RuntimeError) as exc:
-        fail(str(exc), as_json=as_json)
-        return
     emit(payload, human=lambda: _render(args.command, payload), as_json=as_json)
     if payload.get("status") == "fail":
         raise SystemExit(1)

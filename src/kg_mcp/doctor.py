@@ -200,8 +200,7 @@ def check_reranker(settings: Settings) -> dict[str, str]:
                 "reranker.provider 'bge' needs the optional extra: uv sync --extra rerank",
             )
         return _check("reranker", OK, "bge cross-encoder available locally")
-    if not settings.reranker.api_key:
-        return _check("reranker", FAIL, f"reranker.provider '{provider}' has no api_key")
+    # Config validation already refuses openai or gemini without reranker.api_key.
     return _check("reranker", OK, f"{provider} reranker configured")
 
 

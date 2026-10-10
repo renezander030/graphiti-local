@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,28 @@ def _atomic_snapshot(
             temporary.unlink()
 
 
+def write_snapshot(destination: Path, header: dict[str, Any], records: list[dict]) -> str:
+    """Write a checksummed snapshot: the header gains record_count and sha256."""
+    digest = hashlib.sha256(b"".join(_json_line(record) for record in records)).hexdigest()
+    header.update(record_count=len(records), sha256=digest)
+    _atomic_snapshot(destination, header, records)
+    return digest
+
+
+def json_rows(path: Path) -> Iterator[tuple[int, str, dict[str, Any]]]:
+    """Each non-blank line of a JSONL file: its number, its text and its object."""
+    for line_number, line in enumerate(path.open(encoding="utf-8"), 1):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
+        if not isinstance(item, dict):
+            raise ValueError(f"{path}:{line_number}: each line must be an object")
+        yield line_number, line, item
+
+
 async def export_graph(
     graph: Any,
     settings: Any,
@@ -99,36 +122,19 @@ async def export_graph(
     provider = settings.database.provider
     destination = Path(output).expanduser() if output else default_output()
 
-    records: list[dict[str, Any]] = []
-    if provider == "falkordb":
-        # Each group is its own FalkorDB database, so it needs its own driver.
-        for group in groups:
-            records.extend(await _collect(graph.driver.clone(database=group), [group]))
-    elif provider == "ladybug":
-        # Ladybug is single-graph: ingestion writes group_id=None, so also sweep the
-        # empty group rather than reporting an empty snapshot for a populated file.
-        seen: set[str] = set()
-        for candidate in [groups, [""]]:
-            for item in await _collect(graph.driver, candidate):
-                if item.get("uuid") not in seen:
-                    seen.add(item.get("uuid"))
-                    records.append(item)
-    else:
-        records = await _collect(graph.driver, groups)
+    from kg_mcp.queries import collect
 
-    record_bytes = [_json_line(record) for record in records]
-    digest = hashlib.sha256(b"".join(record_bytes)).hexdigest()
+    records = await collect(graph, settings, groups, _collect)
+
     header = {
         "kind": "export",
         "format_version": FORMAT_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider,
         "groups": groups,
-        "record_count": len(records),
-        "sha256": digest,
         "embeddings": "omitted; derived from the text under the embedder in use",
     }
-    _atomic_snapshot(destination, header, records)
+    digest = write_snapshot(destination, header, records)
 
     counts: dict[str, int] = {}
     for record in records:

@@ -224,3 +224,101 @@ def test_search_finds_a_fact_written_by_another_process(tmp_path: Path):
         assert [fact.fact for fact in facts] == ["Ada Lovelace wrote the first program"]
     finally:
         asyncio.run(graph.close())
+
+
+def test_collect_sweeps_the_empty_group_ingestion_writes(tmp_path: Path):
+    """Ingestion writes group_id None; a scan by configured group must still see it."""
+    from types import SimpleNamespace
+
+    from graphiti_core.edges import EntityEdge
+
+    from kg_mcp.queries import collect
+
+    path = tmp_path / "graph.ladybug"
+    asyncio.run(_graph(path, read_only=False).close())
+    database, connection = _writer(path)
+    now = datetime.now(timezone.utc)
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    for node in (a, b):
+        connection.execute(
+            "CREATE (:Entity {uuid: $u, name: $u, group_id: '', created_at: $t, "
+            "name_embedding: $v, summary: '', labels: ['Entity']})",
+            {"u": node, "t": now, "v": [0.5] * 8},
+        )
+    connection.execute(
+        "MATCH (x:Entity {uuid: $a}), (y:Entity {uuid: $b}) "
+        "CREATE (x)-[:RELATES_TO]->(:RelatesToNode_ {uuid: $e, name: 'USED', fact: 'old', "
+        "group_id: '', created_at: $t, invalid_at: $t, fact_embedding: $v, episodes: []})"
+        "-[:RELATES_TO]->(y)",
+        {"a": a, "b": b, "e": str(uuid.uuid4()), "t": now, "v": [0.5] * 8},
+    )
+    connection.execute("CHECKPOINT")
+    connection.close()
+    database.close()
+    settings = SimpleNamespace(
+        database=SimpleNamespace(provider="ladybug"), graph=SimpleNamespace(groups=["example"])
+    )
+    graph = _graph(path, read_only=True)
+    try:
+        edges = asyncio.run(collect(graph, settings, ["example"], EntityEdge.get_by_group_ids))
+        assert [edge.fact for edge in edges] == ["old"]
+        assert edges[0].invalid_at is not None
+    finally:
+        asyncio.run(graph.close())
+
+
+def test_verify_checks_invalidation_on_a_single_ladybug_file(tmp_path: Path, monkeypatch):
+    """kg verify must find a superseded fact ingestion wrote, and see it is not served."""
+    from datetime import timedelta
+
+    from kg_mcp.verify import check_retrieval
+
+    path = tmp_path / "graph.ladybug"
+    asyncio.run(_graph(path, read_only=False).close())
+    database, connection = _writer(path)
+    now = datetime.now(timezone.utc)
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    for node in (a, b):
+        connection.execute(
+            "CREATE (:Entity {uuid: $u, name: $u, group_id: '', created_at: $t, "
+            "name_embedding: $v, summary: '', labels: ['Entity']})",
+            {"u": node, "t": now, "v": [0.5] * 8},
+        )
+    for fact, invalid_at in (
+        ("Aurora uses Postgres", now - timedelta(days=1)),
+        ("Aurora uses DuckDB", None),
+    ):
+        connection.execute(
+            "MATCH (x:Entity {uuid: $a}), (y:Entity {uuid: $b}) "
+            "CREATE (x)-[:RELATES_TO]->(:RelatesToNode_ {uuid: $e, name: 'USES', fact: $f, "
+            "group_id: '', created_at: $t, invalid_at: $i, fact_embedding: $v, episodes: []})"
+            "-[:RELATES_TO]->(y)",
+            {
+                "a": a,
+                "b": b,
+                "e": str(uuid.uuid4()),
+                "f": fact,
+                "t": now,
+                "i": invalid_at,
+                "v": [0.5] * 8,
+            },
+        )
+    connection.execute("CHECKPOINT")
+    connection.close()
+    database.close()
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"graph:\n  groups: [example]\n  workspace_dir: {tmp_path / 'ws'}\n"
+        f"database:\n  provider: ladybug\n  ladybug:\n    path: {path}\n"
+    )
+    monkeypatch.setenv("GRAPHITI_LOCAL_CONFIG", str(config))
+    monkeypatch.setattr(
+        "kg_mcp.runtime.build_graphiti", lambda *a, **k: _graph(path, read_only=True)
+    )
+    checks = {row["check"]: row for row in asyncio.run(check_retrieval("Aurora"))}
+    assert checks["retrieval"]["status"] == "ok"
+    assert checks["invalidation"] == {
+        "check": "invalidation",
+        "status": "ok",
+        "detail": "1 superseded fact(s); none served",
+    }
