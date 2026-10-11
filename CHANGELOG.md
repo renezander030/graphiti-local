@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- The release audit on a published `main` checks the identity of the newest commit only,
+  as its comment intended. It used to walk the whole public history, so every push to
+  `main` failed on commits that were already published and cannot change.
 - `kg verify` checks invalidation on a single Ladybug file. It used to find no superseded
   facts there (ingestion writes the empty group) and then failed comparing timestamps.
 

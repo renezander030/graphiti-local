@@ -68,7 +68,7 @@ def audit(
             [
                 "git",
                 "log",
-                identity_revision(root, identity_base),
+                *identity_revision(root, identity_base),
                 "--format=%an <%ae>%n%cn <%ce>",
             ],
             cwd=root,
@@ -81,8 +81,13 @@ def audit(
     return findings
 
 
-def identity_revision(root: Path, base_revision: str = "origin/HEAD") -> str:
-    """Audit unpublished commits when the remote default branch is available."""
+def identity_revision(root: Path, base_revision: str = "origin/HEAD") -> list[str]:
+    """The ``git log`` revision arguments whose identities the audit checks.
+
+    Commits not yet on the remote default branch when it is available; only the tip of
+    an already-published checkout, whose history is public and cannot change; the whole
+    history when there is no remote base, since nothing has been published yet.
+    """
     base = subprocess.run(
         ["git", "merge-base", base_revision, "HEAD"],
         cwd=root,
@@ -99,10 +104,11 @@ def identity_revision(root: Path, base_revision: str = "origin/HEAD") -> str:
             text=True,
         ).stdout.strip()
         if commit and commit != head:
-            return f"{commit}..HEAD"
-    # A published default-branch checkout has no unpublished range. Check its tip so a
-    # push still cannot introduce a private author identity.
-    return "HEAD"
+            return [f"{commit}..HEAD"]
+        # A published default-branch checkout has no unpublished range. Check its tip so
+        # a push still cannot introduce a private author identity.
+        return ["-1", "HEAD"]
+    return ["HEAD"]
 
 
 def sensitive_identities(log: str) -> list[str]:
