@@ -79,7 +79,10 @@ def check_config(explicit: str | None) -> tuple[list[dict[str, str]], Settings |
 
 
 def check_workspace(settings: Settings) -> dict[str, str]:
-    directory = Path(settings.graph.workspace_dir).expanduser()
+    from kg_mcp.workspace import workspace_dir
+
+    # The same directory the queue and ledgers use, KG_WORKSPACE_DIR included.
+    directory = workspace_dir(settings)
     try:
         directory.mkdir(parents=True, exist_ok=True)
         probe = directory / ".doctor-write-probe"

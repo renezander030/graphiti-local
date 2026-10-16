@@ -111,6 +111,7 @@ CONTENT_FIELDS = (
     "link",
     "supersedes",
     "supersedes_rejection",
+    "edges",
     "valid_at",
     "learned_at",
 )

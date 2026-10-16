@@ -1,8 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
+
+This release adds precise retirement of wrong facts, keeps the review queue readable
+whatever a fact contains, and makes the MCP server's read-only contract explicit.
+
+### Added
+
+- `kg retire GROUP --edge UUID --reason "..."` files one reviewable item that retires the
+  named facts. Once approved, the drain marks exactly those edges invalid as of
+  `--valid-at` (or the drain time), without a model call. If one edge is missing,
+  nothing is retired and the item stays approved.
+- `kg duplicates --facts` reports current facts repeated between the same two entities,
+  oldest copy first, so the extra copies can be retired.
+- Every MCP tool declares itself read-only, non-destructive and idempotent.
+- `search_nodes`, `search_memory_facts` and `get_episodes` report the `groups` they
+  searched.
 
 ### Changed
+
+- An MCP tool call with an argument the tool does not declare is refused, naming the
+  argument and the accepted ones. It used to be ignored, so a misspelled `group_id`
+  read the default groups.
+- With `reranker.provider: openai` and no `reranker.model`, the reranker uses
+  `gpt-4.1-mini`. graphiti-core's default, `gpt-4.1-nano`, is retired on 2026-10-23.
+- `kg doctor` checks the workspace named by `KG_WORKSPACE_DIR` when it is set, the same
+  directory the queue and ledgers use.
 
 - Filing refuses a fact for a group outside `graph.groups` in the library too
   (`workspace.file_facts`, `add_proposal`, `add_bundle`), not only in `kg propose`.
@@ -17,6 +40,11 @@
 
 ### Fixed
 
+- A fact containing U+2028, U+2029 or U+0085 no longer makes the review queue unreadable.
+  Such a proposal used to break every later `propose`, `pending`, `approve` and `drain`,
+  and the same characters in an ingest ledger entry hid it from resume.
+- `kg-workspace list`, `rejected`, `approve` and `reject` report an unreadable queue as a
+  JSON error with exit `1` instead of a traceback.
 - The release audit on a published `main` checks the identity of the newest commit only,
   as its comment intended. It used to walk the whole public history, so every push to
   `main` failed on commits that were already published and cannot change.

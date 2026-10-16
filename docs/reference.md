@@ -26,9 +26,11 @@ kg propose GROUP "fact" --type source-fact --provenance "source"
            [--source SYSTEM --link URL] [--valid-at ISO] [--learned-at ISO]
            [--supersedes-rejection ID]
 kg bundle GROUP --fact "fact" --fact "fact" [same options as propose]
+kg retire GROUP --edge UUID [--edge UUID] --reason "why" [--valid-at ISO]
+          [--source SYSTEM --link URL]
 kg doctor [--offline]
 kg export [group ...] [--output PATH]
-kg duplicates [group ...]
+kg duplicates [group ...] [--facts]
 kg verify [--offline]
 kg --version
 ```
@@ -62,6 +64,12 @@ proposal edited after approval is not drained until it is approved again, and th
 dry run marks it. A proposal whose extraction yields no fact stays approved and is
 reported, instead of being archived as landed; `kg-ingest` lists such records under
 `no_facts`.
+
+`kg retire` files one reviewable item that names fact edges (the `uuid` that `kg ask`
+and `kg edge` print) and why they are no longer true. Once approved, the drain marks
+exactly those edges invalid as of `--valid-at` (the drain time if omitted), with no
+replacement fact and no model call. If one named edge is not found in the group, nothing
+is retired and the item stays approved. `--edge` values are part of the approved digest.
 
 ```yaml
 workspace:
@@ -111,6 +119,12 @@ name the active-writer conflict instead of racing the database.
 `include_invalidated: true` only when historical facts are intentional. Fact results
 include their final reranker score, validity timestamps, the selected ranker, and a
 count of invalidated candidates that were suppressed.
+
+Every MCP tool is annotated read-only, non-destructive and idempotent, so a client can
+run it without asking. A tool call with an argument the tool does not declare is
+refused with the argument's name and the accepted ones, instead of being ignored: a
+misspelled `group_id` would otherwise read the default groups. `search_nodes`,
+`search_memory_facts` and `get_episodes` report the `groups` they searched.
 
 ## Backend choices
 
@@ -246,11 +260,13 @@ an empty database, restore.
 
 ```bash
 kg duplicates            # entities whose names collide once casing and punctuation are ignored
+kg duplicates --facts    # current facts repeated between the same two entities
 ```
 
 Graphiti resolves duplicates by embedding similarity, so `ACME Corp` and `acme corp.`
 can end up as two entities. The report shows what split; a merge is a proposal like any
-other correction.
+other correction. For a repeated fact, `kg retire` with the extra copies' UUIDs removes
+them from current answers.
 
 ## Safety model
 
@@ -287,6 +303,9 @@ was reached, so an empty or short filtered result cannot masquerade as exhaustiv
 FalkorDB queries remove only a standalone `_` token, which RediSearch reserves, and a
 multi-label node search fans out by label before merging UUIDs. Identifiers such as
 `foo_bar` are unchanged.
+
+With `reranker.provider: openai` and no `reranker.model`, the reranker uses
+`gpt-4.1-mini`; graphiti-core's own default, `gpt-4.1-nano`, is retired on 2026-10-23.
 
 `llm.max_tokens` is a hard output ceiling for every extraction call, including an
 upstream prompt that requests a larger budget. `llm.api_mode` selects `responses`,

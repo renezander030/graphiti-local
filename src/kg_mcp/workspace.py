@@ -29,12 +29,16 @@ OPERATIONS = ("assert", "revise", "invalidate")
 FUTURE_TOLERANCE = timedelta(minutes=5)
 
 
-def workspace_dir() -> Path:
-    from kg_mcp.config import load_config
-
+def workspace_dir(settings: Any = None) -> Path:
+    """The workspace directory: ``KG_WORKSPACE_DIR`` if set, else the configured one."""
     override = os.environ.get("KG_WORKSPACE_DIR")
-    configured = load_config().graph.workspace_dir
-    return Path(override or configured).expanduser().resolve()
+    if override:
+        return Path(override).expanduser().resolve()
+    if settings is None:
+        from kg_mcp.config import load_config
+
+        settings = load_config()
+    return Path(settings.graph.workspace_dir).expanduser().resolve()
 
 
 def _path(name: str) -> Path:
@@ -46,15 +50,18 @@ def _read(name: str = "pending.jsonl") -> list[dict]:
     if not path.exists():
         return []
     items = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"{path}:{line_number}: corrupt queue JSON") from exc
-        if isinstance(item, dict):
-            items.append(item)
+    # Iterate the file, not str.splitlines(): a fact may hold U+2028 or U+2029, which
+    # JSON writes unescaped and splitlines() would treat as a line break.
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"{path}:{line_number}: corrupt queue JSON") from exc
+            if isinstance(item, dict):
+                items.append(item)
     return items
 
 
@@ -149,6 +156,62 @@ def _check_fact(domain: str, fact: str, *, supersedes_rejection: str, settings) 
         )
 
 
+SOURCE_REQUIRED = (
+    "workspace.require_source is set: name the source system with --source and "
+    "the record with --link"
+)
+
+
+def _config_for(domain: str) -> Any:
+    """The configuration, once ``domain`` is known to be an allowed group."""
+    from kg_mcp.config import allowed_groups, load_config
+
+    config = load_config()
+    try:
+        allowed_groups(domain, config)
+    except ValueError as exc:
+        raise CommandError(str(exc), code=EXIT_REJECTED) from exc
+    return config
+
+
+def _refuse_secrets(*texts: str, subject: str) -> None:
+    shapes = secret_shapes(*texts)
+    if shapes:
+        raise CommandError(
+            f"proposal carries a {', '.join(shapes)} shape; state the {subject} without the value",
+            code=EXIT_SECRET_SHAPED,
+        )
+
+
+def _new_item(
+    domain: str,
+    fact_type: str,
+    *,
+    provenance: str,
+    source: str,
+    link: str,
+    valid_at: str,
+    learned_at: str,
+) -> dict[str, Any]:
+    """The fields every queued item starts with; a malformed date is refused here."""
+    item: dict[str, Any] = {
+        "id": "proposal-" + uuid.uuid4().hex[:12],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "domain": domain,
+        "fact_type": fact_type,
+        "provenance": provenance,
+    }
+    if source:
+        item["source"] = source
+    if link:
+        item["link"] = link
+    if valid_at.strip():
+        item["valid_at"] = _timestamp(valid_at, "--valid-at")
+    if learned_at.strip():
+        item["learned_at"] = _timestamp(learned_at, "--learned-at")
+    return item
+
+
 def file_facts(
     domain: str,
     facts: list[str],
@@ -167,13 +230,7 @@ def file_facts(
 
     Every refusal is a ``CommandError`` carrying the exit code a caller should use.
     """
-    from kg_mcp.config import allowed_groups, load_config
-
-    config = load_config()
-    try:
-        allowed_groups(domain, config)
-    except ValueError as exc:
-        raise CommandError(str(exc), code=EXIT_REJECTED) from exc
+    config = _config_for(domain)
     facts = [fact.strip() for fact in facts if fact.strip()]
     provenance, source, link = provenance.strip(), source.strip(), link.strip()
     supersedes, supersedes_rejection = supersedes.strip(), supersedes_rejection.strip()
@@ -187,35 +244,20 @@ def file_facts(
             len(facts) > 1 and not (provenance or source or link),
             "a bundle names the one source its facts come from: --provenance, --source or --link",
         ),
-        (
-            settings.require_source and not (source and link),
-            "workspace.require_source is set: name the source system with --source and "
-            "the record with --link",
-        ),
+        (settings.require_source and not (source and link), SOURCE_REQUIRED),
     ):
         if refused:
             raise CommandError(message, code=EXIT_REJECTED)
-    shapes = secret_shapes(*facts, supersedes, provenance, source, link)
-    if shapes:
-        raise CommandError(
-            f"proposal carries a {', '.join(shapes)} shape; state the fact without the value",
-            code=EXIT_SECRET_SHAPED,
-        )
-    item: dict[str, Any] = {
-        "id": "proposal-" + uuid.uuid4().hex[:12],
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "domain": domain,
-        "fact_type": fact_type,
-        "provenance": provenance,
-    }
-    if source:
-        item["source"] = source
-    if link:
-        item["link"] = link
-    if valid_at.strip():
-        item["valid_at"] = _timestamp(valid_at, "--valid-at")
-    if learned_at.strip():
-        item["learned_at"] = _timestamp(learned_at, "--learned-at")
+    _refuse_secrets(*facts, supersedes, provenance, source, link, subject="fact")
+    item = _new_item(
+        domain,
+        fact_type,
+        provenance=provenance,
+        source=source,
+        link=link,
+        valid_at=valid_at,
+        learned_at=learned_at,
+    )
     if supersedes_rejection:
         item["supersedes_rejection"] = supersedes_rejection
     for fact in facts:
@@ -227,6 +269,48 @@ def file_facts(
         supersedes=supersedes,
         status="pending",
     )
+    append_locked("pending.jsonl", item)
+    return item
+
+
+def retire_facts(
+    domain: str,
+    edges: list[str],
+    *,
+    reason: str,
+    provenance: str = "",
+    source: str = "",
+    link: str = "",
+    valid_at: str = "",
+    learned_at: str = "",
+) -> dict:
+    """Queue one reviewable item that retires the named fact edges, with no replacement.
+
+    Once approved, ``drain`` marks exactly these edges invalid as of ``valid_at`` (when
+    the facts stopped being true; the drain time if omitted). Refusals are ``CommandError``.
+    """
+    config = _config_for(domain)
+    edges = list(dict.fromkeys(edge.strip() for edge in edges if edge.strip()))
+    reason, provenance = reason.strip(), provenance.strip()
+    source, link = source.strip(), link.strip()
+    for refused, message in (
+        (not edges, "retire names at least one fact edge: --edge <uuid>"),
+        (not reason, "retire needs --reason: why these facts are no longer true"),
+        (config.workspace.require_source and not (source and link), SOURCE_REQUIRED),
+    ):
+        if refused:
+            raise CommandError(message, code=EXIT_REJECTED)
+    _refuse_secrets(reason, provenance, source, link, subject="reason")
+    item = _new_item(
+        domain,
+        "action-record",
+        provenance=provenance,
+        source=source,
+        link=link,
+        valid_at=valid_at,
+        learned_at=learned_at,
+    )
+    item.update(operation="retire", text=reason, edges=edges, supersedes="", status="pending")
     append_locked("pending.jsonl", item)
     return item
 
@@ -314,6 +398,8 @@ def _texts(item: dict) -> list[str]:
 
 def _episodes(item: dict) -> list[tuple[int, dict]]:
     """The episode each fact of an approved proposal becomes, skipping facts that landed."""
+    if item["operation"] == "retire":
+        return []
     texts = _texts(item)
     landed = set(item.get("landed") or [])
     return [
@@ -330,6 +416,21 @@ def _episodes(item: dict) -> list[tuple[int, dict]]:
         )
         for index, text in enumerate(texts)
         if index not in landed
+    ]
+
+
+def _planned(item: dict) -> list[dict]:
+    """What a drain would do with one approved item, in queue order: each fact still to
+    land, or the one retirement."""
+    if item["operation"] == "retire":
+        changes = [(f"retire {', '.join(item['edges'])}: {item['text']}", item.get("valid_at"))]
+    else:
+        changes = [(record["body"], record["valid_at"]) for _, record in _episodes(item)]
+    binding = _binding_error(item) or "ok"
+    return [
+        {"id": item["id"], "domain": item["domain"], "body": body, "valid_at": valid_at,
+         "binding": binding}
+        for body, valid_at in changes
     ]
 
 
@@ -363,26 +464,36 @@ async def drain(*, apply: bool) -> dict:
             "applied": False,
             "ingested": 0,
             "failed": [],
-            "planned": [
-                {
-                    "id": item["id"],
-                    "domain": item["domain"],
-                    "body": record["body"],
-                    "valid_at": record["valid_at"],
-                    "binding": _binding_error(item) or "ok",
-                }
-                for item in approved
-                for _, record in _episodes(item)
-            ],
+            "planned": [row for item in approved for row in _planned(item)],
         }
 
-    from kg_mcp.ingest import ingest_records
+    from kg_mcp.ingest import ingest_records, retire_edges
 
     completed, failures = 0, []
     for item in approved:
         error = _binding_error(item)
         if error:
             failures.append({"id": item["id"], "domain": item["domain"], "error": error})
+            continue
+        if item["operation"] == "retire":
+            outcome = await retire_edges(
+                item["domain"],
+                item["edges"],
+                ended=datetime.fromisoformat(item["valid_at"]) if item.get("valid_at") else None,
+            )
+            if outcome["missing"]:
+                # Retire all of what the reviewer approved or nothing; the item stays approved.
+                failures.append(
+                    {
+                        "id": item["id"],
+                        "domain": item["domain"],
+                        "error": "fact edge(s) not found in this group: "
+                        + ", ".join(outcome["missing"]),
+                    }
+                )
+                continue
+            _update(item["id"], archive=True, **outcome)
+            completed += 1
             continue
         total = len(_texts(item))
         landed = list(item.get("landed") or [])
@@ -435,7 +546,8 @@ def main() -> None:
 
     if args.command in ("list", "rejected"):
         groups = [args.domain] if args.domain else None
-        items = pending_for(groups) if args.command == "list" else rejected_for(groups)
+        with refusals(as_json=as_json):
+            items = pending_for(groups) if args.command == "list" else rejected_for(groups)
         payload = {"pending" if args.command == "list" else "rejected": items}
 
         def human() -> list[str]:
@@ -457,9 +569,10 @@ def main() -> None:
         return
     if args.command in ("approve", "reject"):
         status = "approved" if args.command == "approve" else "rejected"
-        result = _human_set_status(
-            set(args.ids), status, reason=getattr(args, "reason", "") or ""
-        )
+        with refusals(as_json=as_json):
+            result = _human_set_status(
+                set(args.ids), status, reason=getattr(args, "reason", "") or ""
+            )
 
         def decision_human() -> list[str]:
             lines = [f"{result['changed']} proposal(s) {status}"]
