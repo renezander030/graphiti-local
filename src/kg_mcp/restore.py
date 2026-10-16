@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from kg_mcp.config import Settings, allowed_groups, load_config
-from kg_mcp.export import EMBEDDING_FIELDS, FORMAT_VERSION, json_rows
+from kg_mcp.export import EMBEDDING_FIELDS, FORMAT_VERSION, json_rows, record_models
 from kg_mcp.queries import graph_drivers
 
 KINDS = ("entity_node", "episodic_node", "entity_edge", "episodic_edge")
@@ -85,20 +85,11 @@ def file_group(record: dict[str, Any], override: str | None, settings: Settings)
 
 
 def build_model(record: dict[str, Any], group: str) -> Any:
-    from graphiti_core.edges import EntityEdge, EpisodicEdge
-    from graphiti_core.nodes import EntityNode, EpisodicNode
-
-    models = {
-        "entity_node": EntityNode,
-        "episodic_node": EpisodicNode,
-        "entity_edge": EntityEdge,
-        "episodic_edge": EpisodicEdge,
-    }
     payload = {
         key: value for key, value in record.items() if key != "kind" and key not in EMBEDDING_FIELDS
     }
     payload["group_id"] = group
-    return models[record["kind"]].model_validate(payload)
+    return record_models()[record["kind"]].model_validate(payload)
 
 
 async def _embed(model: Any, embedder: Any) -> None:

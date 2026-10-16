@@ -34,19 +34,24 @@ def default_output() -> Path:
     return workspace_dir() / f"export-{stamp}.jsonl"
 
 
-async def _collect(driver: Any, groups: list[str]) -> list[dict[str, Any]]:
+def record_models() -> dict[str, Any]:
+    """The graphiti model behind each snapshot record kind, in snapshot order."""
     from graphiti_core.edges import EntityEdge, EpisodicEdge
-    from graphiti_core.errors import GroupsEdgesNotFoundError
     from graphiti_core.nodes import EntityNode, EpisodicNode
 
-    kinds = (
-        (EntityNode, "entity_node"),
-        (EpisodicNode, "episodic_node"),
-        (EntityEdge, "entity_edge"),
-        (EpisodicEdge, "episodic_edge"),
-    )
+    return {
+        "entity_node": EntityNode,
+        "episodic_node": EpisodicNode,
+        "entity_edge": EntityEdge,
+        "episodic_edge": EpisodicEdge,
+    }
+
+
+async def _collect(driver: Any, groups: list[str]) -> list[dict[str, Any]]:
+    from graphiti_core.errors import GroupsEdgesNotFoundError
+
     collected: list[dict[str, Any]] = []
-    for model, kind in kinds:
+    for kind, model in record_models().items():
         try:
             records = await model.get_by_group_ids(driver, groups)
         except GroupsEdgesNotFoundError:

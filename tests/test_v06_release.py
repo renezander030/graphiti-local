@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -210,7 +209,7 @@ def test_success_and_failure_ledgers_are_durable(tmp_path: Path, monkeypatch):
 
 
 def _snapshot(path: Path) -> Path:
-    from kg_mcp.export import FORMAT_VERSION, _atomic_snapshot, _json_line
+    from kg_mcp.export import FORMAT_VERSION, write_snapshot
 
     records = [
         {"kind": "entity_node", "uuid": "n1", "group_id": "example"},
@@ -223,16 +222,13 @@ def _snapshot(path: Path) -> Path:
         {"kind": "entity_edge", "uuid": "keep", "fact": "keep me"},
         {"kind": "entity_edge", "uuid": "drop", "fact": "drop me"},
     ]
-    digest = hashlib.sha256(b"".join(_json_line(record) for record in records)).hexdigest()
     header = {
         "kind": "export",
         "format_version": FORMAT_VERSION,
-        "record_count": len(records),
-        "sha256": digest,
         "provider": "ladybug",
         "groups": ["example"],
     }
-    _atomic_snapshot(path, header, records)
+    write_snapshot(path, header, records)
     return path
 
 
