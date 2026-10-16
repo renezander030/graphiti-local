@@ -210,3 +210,84 @@ def test_kg_propose_says_who_approved(ruled, monkeypatch, capsys):
     cli.main()
     payload = json.loads(capsys.readouterr().out)
     assert (payload["status"], payload["decided_by"]) == ("approved", "policy:action-record:said")
+
+
+def test_a_fact_filed_over_a_rejection_waits_for_a_person(ruled):
+    from kg_mcp import workspace
+
+    first = workspace.add_proposal(
+        "example", "Invoice 42 was paid.", fact_type="source-fact", source="l", link="l:42"
+    )
+    workspace._human_set_status({first["id"]}, "rejected", reason="wrong invoice")
+    again = workspace.add_proposal(
+        "example",
+        "Invoice 42 was paid.",
+        fact_type="source-fact",
+        source="l",
+        link="l:42",
+        supersedes_rejection=first["id"],
+    )
+    assert again["status"] == "pending" and "decided_by" not in again
+
+
+def test_a_rejection_drops_the_rules_approval(ruled):
+    from kg_mcp import workspace
+
+    item = workspace.add_proposal(
+        "example", "Invoice 42 was paid.", fact_type="source-fact", source="l", link="l:42"
+    )
+    workspace._human_set_status({item["id"]}, "rejected")
+    archived = workspace._read("archive.jsonl")[0]
+    assert archived["decided_by"] == "reviewer" and "approved_digest" not in archived
+
+
+def test_a_partly_drained_bundle_cannot_be_rejected(ruled, monkeypatch):
+    from kg_mcp import workspace
+
+    calls = []
+
+    async def first_lands(records, **kwargs):
+        calls.append(records)
+        if len(calls) > 1:
+            return {"applied": True, "ingested": 0, "failed": [{"error": "down"}], "receipts": []}
+        receipt = {"episode_uuid": "episode-1", "edges": 1}
+        return {"applied": True, "ingested": 1, "failed": [], "receipts": [receipt]}
+
+    monkeypatch.setattr("kg_mcp.ingest.ingest_records", first_lands)
+    item = workspace.add_bundle(
+        "example", ["Aurora runs in Frankfurt.", "Aurora left Dublin."],
+        fact_type="action-record", said="We moved Aurora.",
+    )
+    asyncio.run(workspace.drain(apply=True))
+    assert workspace._read()[0]["landed"] == [0]
+    result = workspace._human_set_status({item["id"]}, "rejected")
+    assert result["unknown"] == [item["id"]]
+    assert workspace._read()[0]["status"] == "approved"
+
+
+def test_a_drain_skips_an_item_rejected_after_it_read_the_queue(ruled, monkeypatch):
+    from kg_mcp import workspace
+
+    first, second = (
+        workspace.add_proposal(
+            "example", text, fact_type="source-fact", source="l", link=f"l:{number}"
+        )
+        for number, text in ((1, "Invoice 1 was paid."), (2, "Invoice 2 was paid."))
+    )
+    ingest = Ingest()
+    outcomes = {}
+
+    async def reject_during_drain(records, **kwargs):
+        # While the first item is being written, a reviewer rejects both items.
+        outcomes.update(workspace._human_set_status({first["id"], second["id"]}, "rejected"))
+        return await ingest(records, **kwargs)
+
+    monkeypatch.setattr("kg_mcp.ingest.ingest_records", reject_during_drain)
+    result = asyncio.run(workspace.drain(apply=True))
+    # The first was claimed before its write, so the rejection could not take it back;
+    # the second was rejected before the drain reached it, so it never reached the graph.
+    assert outcomes["unknown"] == [first["id"]]
+    assert result["ingested"] == 1
+    assert [record["name"] for record in ingest.records] == [f"workspace {first['id']}"]
+    archived = {row["id"]: row["status"] for row in workspace._read("archive.jsonl")}
+    assert archived == {first["id"]: "approved", second["id"]: "rejected"}

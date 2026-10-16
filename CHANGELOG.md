@@ -11,7 +11,9 @@ while every inference and every correction still waits for a person.
   filing: `{fact_type: source-fact, require: source-link}` approves a fact that names
   its `--source` and `--link`; `{fact_type: action-record, require: said}` approves one
   that carries the reviewer's own words. `belief` cannot be listed, and `revise`,
-  `invalidate` and `retire` always wait. An approved item records `decided_by`
+  `invalidate` and `retire` always wait, and so does a fact filed with
+  `--supersedes-rejection`. A `said` rule trusts the caller to pass the reviewer's
+  words. An approved item records `decided_by`
   (`policy:<type>:<require>`) and is bound to its content digest like a reviewer's
   approval.
 - `kg propose` and `kg bundle` take `--said "..."`: the reviewer's own words when the
@@ -21,8 +23,11 @@ while every inference and every correction still waits for a person.
 
 ### Changed
 
-- `kg-workspace reject` also rejects an approved item that has not drained yet, whoever
-  approved it. It used to refuse anything but a pending item.
+- `kg-workspace reject` also rejects an approved item, whoever approved it, until a
+  drain claims it. It used to refuse anything but a pending item. The drain now claims
+  each item under the workspace lock just before its first write and skips an item
+  rejected or changed since it read the queue; an item with a landed fact can no longer
+  be rejected. A rejection records `decided_by: reviewer` and drops the approval digest.
 
 ## 0.8.0
 

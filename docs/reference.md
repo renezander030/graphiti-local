@@ -93,7 +93,11 @@ workspace:
 inference) cannot be listed. `revise`, `invalidate` and `retire` always wait, whatever
 their evidence. A rule's approval records `decided_by: policy:<type>:<require>`, is
 bound to the content digest like a reviewer's, and shows in the drain dry run.
-`kg-workspace reject ID` still stops an approved item that has not drained.
+A fact filed with `--supersedes-rejection` always waits for a person. A `said` rule
+trusts the caller to pass the reviewer's own words, so list it only where the caller is
+the reviewer's own session. `kg-workspace reject ID` still stops an approved item until
+a drain claims it; a drain claims each item under the workspace lock just before its
+first write, and an item with a landed fact can no longer be rejected (retire it).
 
 ## Built for unattended use
 

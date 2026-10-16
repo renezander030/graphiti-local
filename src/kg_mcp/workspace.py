@@ -292,8 +292,9 @@ def _approve(item: dict, *, by: str | None = None, at: str | None = None) -> Non
 
 
 def _approving_rule(item: dict, rules: list[Any]) -> Any:
-    """The first rule that approves a new fact at filing; corrections always wait."""
-    if item["operation"] != "assert":
+    """The first rule that approves a new fact at filing. Corrections, and a fact filed
+    over a person's rejection, always wait for a person."""
+    if item["operation"] != "assert" or item.get("supersedes_rejection"):
         return None
     return next((rule for rule in rules if rule.approves(item)), None)
 
@@ -364,29 +365,36 @@ def _rewrite(change: Callable[[dict], bool]) -> None:
         _write("pending.jsonl", remaining)
 
 
+def _decidable(item: dict, status: str) -> bool:
+    """Whether a reviewer can now give ``item`` the ``status`` approved or rejected."""
+    if item.get("status") == "pending":
+        return True
+    if item.get("status") != "approved":
+        return False
+    if status == "approved":
+        # Re-approving binds an approval that predates content digests.
+        return "approved_digest" not in item
+    # An approved item can still be rejected, whoever approved it, until a drain has
+    # claimed it or landed any of its facts.
+    return not item.get("draining_at") and not item.get("landed")
+
+
 def _human_set_status(ids: set[str], status: str, *, reason: str = "") -> dict[str, Any]:
     """Approve or reject. An approval is bound to the digest of the content it saw."""
     decided: set[str] = set()
     now = datetime.now(timezone.utc).isoformat()
 
     def decide(item: dict) -> bool:
-        decidable = item.get("id") in ids and (
-            item.get("status") == "pending"
-            # An approved item that has not drained can still be rejected, whoever approved it.
-            or (status == "rejected" and item.get("status") == "approved")
-            or (
-                status == "approved"
-                and item.get("status") == "approved"
-                and "approved_digest" not in item
-            )
-        )
-        if not decidable:
+        if item.get("id") not in ids or not _decidable(item, status):
             return False
         decided.add(item["id"])
         if status == "approved":
             _approve(item, at=now)
             return False
         item.update(status=status, decided_at=now)
+        # The rejection is the reviewer's; drop any earlier approval and its binding.
+        item.pop("approved_digest", None)
+        item["decided_by"] = "reviewer"
         if reason.strip():
             item["reason"] = reason.strip()
         # Rejections leave the queue for the archive, where the rejection gate reads them.
@@ -472,6 +480,27 @@ def _binding_error(item: dict) -> str | None:
     return None
 
 
+def _claim(item: dict) -> bool:
+    """Under the lock, mark an item as being drained if it is still approved with the
+    content the drain read. A claimed item can no longer be rejected."""
+    claimed = False
+
+    def change(queued: dict) -> bool:
+        nonlocal claimed
+        if (
+            queued.get("id") == item["id"]
+            and queued.get("status") == "approved"
+            and queued.get("approved_digest") == item.get("approved_digest")
+            and _binding_error(queued) is None
+        ):
+            queued.setdefault("draining_at", datetime.now(timezone.utc).isoformat())
+            claimed = True
+        return False
+
+    _rewrite(change)
+    return claimed
+
+
 def _update(item_id: str, *, archive: bool = False, **fields: Any) -> None:
     """Change one queued item; ``archive`` moves it from the queue to the archive."""
 
@@ -504,6 +533,8 @@ async def drain(*, apply: bool) -> dict:
         if error:
             failures.append({"id": item["id"], "domain": item["domain"], "error": error})
             continue
+        if not _claim(item):
+            continue  # rejected or changed since this drain read the queue
         if item["operation"] == "retire":
             outcome = await retire_edges(
                 item["domain"],
