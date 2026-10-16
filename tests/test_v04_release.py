@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -215,19 +214,13 @@ def test_falkor_multi_label_node_search_fans_out(monkeypatch):
 
 
 def test_verifiable_snapshot_detects_tampering_and_accepts_v1(tmp_path: Path):
-    from kg_mcp.export import FORMAT_VERSION, _atomic_snapshot, _json_line
+    from kg_mcp.export import FORMAT_VERSION, write_snapshot
     from kg_mcp.restore import read_snapshot
 
     records = [{"kind": "entity_node", "uuid": "n1", "name": "Ada"}]
-    digest = hashlib.sha256(b"".join(_json_line(record) for record in records)).hexdigest()
-    header = {
-        "kind": "export",
-        "format_version": FORMAT_VERSION,
-        "record_count": 1,
-        "sha256": digest,
-    }
+    header = {"kind": "export", "format_version": FORMAT_VERSION}
     snapshot = tmp_path / "snapshot.jsonl"
-    _atomic_snapshot(snapshot, header, records)
+    write_snapshot(snapshot, header, records)
     assert read_snapshot(snapshot)[1][0]["name"] == "Ada"
 
     snapshot.write_text(

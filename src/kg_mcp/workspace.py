@@ -58,16 +58,17 @@ def _read(name: str = "pending.jsonl") -> list[dict]:
     return items
 
 
+def replace_text(path: Path, text: str) -> None:
+    """Write a whole file so a reader sees the old content or the new, never a part."""
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def _write(name: str, items: list[dict]) -> None:
-    directory = workspace_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    target = _path(name)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
-        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in items),
-        encoding="utf-8",
-    )
-    os.replace(temporary, target)
+    workspace_dir().mkdir(parents=True, exist_ok=True)
+    lines = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in items)
+    replace_text(_path(name), lines)
 
 
 def _append(name: str, item: dict, *, sort_keys: bool = False) -> None:
@@ -77,14 +78,15 @@ def _append(name: str, item: dict, *, sort_keys: bool = False) -> None:
         handle.write(json.dumps(item, ensure_ascii=False, sort_keys=sort_keys) + "\n")
 
 
-def _lock() -> FileLock:
+def workspace_lock() -> FileLock:
+    """The lock every writer of a workspace file holds."""
     workspace_dir().mkdir(parents=True, exist_ok=True)
     return FileLock(str(_path(".lock")))
 
 
 def append_locked(name: str, item: dict, *, sort_keys: bool = False) -> None:
     """Append one JSON line to a workspace file under the shared workspace lock."""
-    with _lock():
+    with workspace_lock():
         _append(name, item, sort_keys=sort_keys)
 
 
@@ -243,7 +245,7 @@ def add_bundle(domain: str, facts: list[str], **fields: Any) -> dict:
 
 def _rewrite(change: Callable[[dict], bool]) -> None:
     """Under the lock, let ``change`` edit each queued item; True moves it to the archive."""
-    with _lock():
+    with workspace_lock():
         remaining = []
         for item in _read():
             if change(item):
@@ -310,6 +312,27 @@ def _texts(item: dict) -> list[str]:
     return list(item.get("facts") or [item["text"]])
 
 
+def _episodes(item: dict) -> list[tuple[int, dict]]:
+    """The episode each fact of an approved proposal becomes, skipping facts that landed."""
+    texts = _texts(item)
+    landed = set(item.get("landed") or [])
+    return [
+        (
+            index,
+            {
+                "name": f"workspace {item['id']}" + (f" #{index + 1}" if len(texts) > 1 else ""),
+                "body": _episode_body(item, text),
+                "domain": item["domain"],
+                # When the fact happened, not when it was filed.
+                "valid_at": item.get("valid_at") or item["created_at"],
+                "provenance": _provenance(item),
+            },
+        )
+        for index, text in enumerate(texts)
+        if index not in landed
+    ]
+
+
 def _binding_error(item: dict) -> str | None:
     recorded = item.get("approved_digest")
     if not recorded:
@@ -344,13 +367,12 @@ async def drain(*, apply: bool) -> dict:
                 {
                     "id": item["id"],
                     "domain": item["domain"],
-                    "body": _episode_body(item, text),
-                    "valid_at": item.get("valid_at") or item["created_at"],
+                    "body": record["body"],
+                    "valid_at": record["valid_at"],
                     "binding": _binding_error(item) or "ok",
                 }
                 for item in approved
-                for index, text in enumerate(_texts(item))
-                if index not in set(item.get("landed") or [])
+                for _, record in _episodes(item)
             ],
         }
 
@@ -362,21 +384,10 @@ async def drain(*, apply: bool) -> dict:
         if error:
             failures.append({"id": item["id"], "domain": item["domain"], "error": error})
             continue
-        texts = _texts(item)
+        total = len(_texts(item))
         landed = list(item.get("landed") or [])
         episodes = list(item.get("episodes") or [])
-        for index, text in enumerate(texts):
-            if index in landed:
-                continue
-            suffix = f" #{index + 1}" if len(texts) > 1 else ""
-            record = {
-                "name": f"workspace {item['id']}{suffix}",
-                "body": _episode_body(item, text),
-                "domain": item["domain"],
-                # When the fact happened, not when it was filed.
-                "valid_at": item.get("valid_at") or item["created_at"],
-                "provenance": _provenance(item),
-            }
+        for index, record in _episodes(item):
             result = await ingest_records([record], apply=True, resume=False)
             # Archive only what actually landed. A failure, or an extraction that produced
             # no fact, leaves the proposal approved so the next drain retries it.
@@ -388,15 +399,15 @@ async def drain(*, apply: bool) -> dict:
                 error = None
             if error:
                 failure = {"id": item["id"], "domain": item["domain"], "error": error}
-                if suffix:
+                if total > 1:
                     failure["fact"] = index + 1
                 failures.append(failure)
                 continue
             landed.append(index)
             episodes.append(result["receipts"][0]["episode_uuid"])
-            if len(landed) < len(texts):
+            if len(landed) < total:
                 _update(item["id"], landed=landed, episodes=episodes)
-        if len(landed) == len(texts):
+        if len(landed) == total:
             _update(item["id"], archive=True, landed=landed, episodes=episodes)
             completed += 1
     return {"applied": True, "ingested": completed, "failed": failures, "planned": []}

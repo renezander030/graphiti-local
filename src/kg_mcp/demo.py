@@ -175,7 +175,6 @@ def main(argv: list[str] | None = None) -> int:
     config = home / "demo.yaml"
     config.write_text(_CONFIG.format(workspace=home, database=database, unreachable=_UNREACHABLE))
     os.environ["GRAPHITI_LOCAL_CONFIG"] = str(config)
-    os.environ.setdefault("KG_LADYBUG_PATH", str(database))
     os.environ.setdefault("KG_WORKSPACE_DIR", str(home))
 
     facts = asyncio.run(_ask(args.question, args.limit))

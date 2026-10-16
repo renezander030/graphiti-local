@@ -439,6 +439,35 @@ def test_bundle_drains_each_fact_and_resumes_after_a_partial_failure(configured,
     assert workspace._read("archive.jsonl")[0]["landed"] == [0, 1]
 
 
+def test_a_dry_run_plans_exactly_the_facts_still_to_land(configured, monkeypatch):
+    from kg_mcp import workspace
+
+    item = workspace.add_bundle(
+        "example",
+        ["Aurora uses DuckDB.", "Aurora runs in Frankfurt."],
+        source="meeting notes",
+        valid_at="2026-03-01",
+    )
+    _approve_all(workspace)
+    _drain(monkeypatch, Ingest(1, None))
+
+    planned = asyncio.run(workspace.drain(apply=False))["planned"]
+    assert planned == [
+        {
+            "id": item["id"],
+            "domain": "example",
+            "body": "Aurora runs in Frankfurt.",
+            "valid_at": item["valid_at"],
+            "binding": "ok",
+        }
+    ]
+    retry = Ingest(1)
+    _drain(monkeypatch, retry)
+    assert [(record["body"], record["valid_at"]) for record in retry.records] == [
+        (entry["body"], entry["valid_at"]) for entry in planned
+    ]
+
+
 def test_every_fact_in_a_bundle_passes_the_gates(configured):
     from kg_mcp import workspace
 

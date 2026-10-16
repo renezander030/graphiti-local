@@ -165,7 +165,6 @@ def build_llm(settings: Settings):
 
 
 def build_graphiti(settings: Settings, *, read_only: bool):
-    os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     os.environ.setdefault("EMBEDDING_DIM", str(settings.embedder.dimensions))
 
     from graphiti_core import Graphiti

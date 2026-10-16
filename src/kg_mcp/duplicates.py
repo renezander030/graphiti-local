@@ -42,18 +42,14 @@ def cluster(nodes: list[Any]) -> list[dict[str, Any]]:
     return clusters
 
 
-async def _entities(graph: Any, settings: Any, groups: list[str]) -> list[Any]:
+async def find_duplicates(
+    graph: Any, settings: Any, groups: list[str], *, limit: int = 50
+) -> dict[str, Any]:
     from graphiti_core.nodes import EntityNode
 
     from kg_mcp.queries import collect
 
-    return await collect(graph, settings, groups, EntityNode.get_by_group_ids)
-
-
-async def find_duplicates(
-    graph: Any, settings: Any, groups: list[str], *, limit: int = 50
-) -> dict[str, Any]:
-    nodes = await _entities(graph, settings, groups)
+    nodes = await collect(graph, settings, groups, EntityNode.get_by_group_ids)
     clusters = cluster(nodes)
     return {
         "groups": groups,

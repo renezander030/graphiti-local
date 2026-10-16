@@ -15,7 +15,6 @@ library without a configuration file or workspace.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -61,10 +60,10 @@ def record_embedder(
         "api_url": api_url,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
+    from kg_mcp.workspace import replace_text
+
     with FileLock(str(path) + ".lock"):
-        temporary = path.with_name(path.name + ".tmp")
-        temporary.write_text(json.dumps(entry, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, path)
+        replace_text(path, json.dumps(entry, indent=2, ensure_ascii=False))
     return entry
 
 
@@ -149,20 +148,13 @@ def _ladybug_file(settings: Settings) -> str | None:
 
 def record(settings: Settings) -> dict[str, Any]:
     """Stamp the configured embedder for this database. Called after a write lands."""
-    from filelock import FileLock
+    from kg_mcp.workspace import replace_text, workspace_lock
 
-    from kg_mcp.workspace import workspace_dir
-
-    directory = workspace_dir()
-    directory.mkdir(parents=True, exist_ok=True)
     entry = {**current(settings), "recorded_at": datetime.now(timezone.utc).isoformat()}
-    with FileLock(str(directory / ".lock")):
+    with workspace_lock():
         data = _load()
         data[database_key(settings)] = entry
-        target = _path()
-        temporary = target.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, target)
+        replace_text(_path(), json.dumps(data, indent=2, ensure_ascii=False))
     path = _ladybug_file(settings)
     if path:
         record_embedder(

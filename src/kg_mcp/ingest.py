@@ -221,6 +221,11 @@ def read_input(
     return prepared
 
 
+def _domain(record: dict[str, Any], settings: Settings) -> str:
+    """The group a record is filed under: its own domain, else the first configured group."""
+    return str(record.get("domain") or settings.graph.groups[0])
+
+
 def _reference_time(value: str | None) -> datetime:
     if not value:
         return datetime.now(timezone.utc)
@@ -353,7 +358,7 @@ async def ingest_records(
 ) -> dict[str, Any]:
     settings = settings or load_config()
     for record in records:
-        domain = str(record.get("domain") or settings.graph.groups[0])
+        domain = _domain(record, settings)
         allowed_groups(domain, settings)
 
     from kg_mcp.config import per_group_ladybug, settings_for_group
@@ -363,9 +368,7 @@ async def ingest_records(
         # writer lock and embedder record, and never open another group's file.
         by_domain: dict[str, list[dict[str, Any]]] = {}
         for record in records:
-            by_domain.setdefault(
-                str(record.get("domain") or settings.graph.groups[0]), []
-            ).append(record)
+            by_domain.setdefault(_domain(record, settings), []).append(record)
         merged: dict[str, Any] = {
             "applied": apply,
             "ingested": 0,
@@ -398,7 +401,7 @@ async def ingest_records(
     seen = completed_keys() if (resume and ledger) else set()
     planned, skipped = [], 0
     for record in records:
-        domain = str(record.get("domain") or settings.graph.groups[0])
+        domain = _domain(record, settings)
         key = record_key(record, domain)
         if key in seen:
             skipped += 1
@@ -517,7 +520,7 @@ async def stage_extraction(
 ) -> dict[str, Any]:
     """Extract into a disposable graph and export the resolved facts for review."""
     settings = load_config()
-    domains = {str(record.get("domain") or settings.graph.groups[0]) for record in records}
+    domains = {_domain(record, settings) for record in records}
     for domain in domains:
         allowed_groups(domain, settings)
     if len(domains) != 1:
@@ -603,7 +606,7 @@ async def stage_extraction(
 
 
 def main() -> None:
-    from kg_mcp.output import emit, fail, refusals
+    from kg_mcp.output import EXIT_REJECTED, emit, fail, refusals
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
@@ -670,16 +673,16 @@ def main() -> None:
     if (args.review_decisions or args.approved_output) and not args.restore:
         fail(
             "--review-decisions and --approved-output require --restore",
-            code=2,
+            code=EXIT_REJECTED,
             as_json=as_json,
         )
         return
     if args.approved_output and not args.review_decisions:
-        fail("--approved-output requires --review-decisions", code=2, as_json=as_json)
+        fail("--approved-output requires --review-decisions", code=EXIT_REJECTED, as_json=as_json)
         return
     if args.review_output and (args.apply or args.restore):
         refused = "--review-output cannot be combined with --apply or --restore"
-        fail(refused, code=2, as_json=as_json)
+        fail(refused, code=EXIT_REJECTED, as_json=as_json)
         return
     if args.restore:
         _restore_main(args, as_json=as_json)
