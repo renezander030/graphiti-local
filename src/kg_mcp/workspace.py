@@ -14,6 +14,7 @@ from typing import Any
 
 from filelock import FileLock
 
+from kg_mcp.config import FACT_TYPES
 from kg_mcp.gates import content_digest, rejected_matches, secret_shapes, sentences
 from kg_mcp.output import (
     EXIT_NOT_ATOMIC,
@@ -23,7 +24,6 @@ from kg_mcp.output import (
     CommandError,
 )
 
-FACT_TYPES = ("belief", "source-fact", "action-record", "live-finding")
 OPERATIONS = ("assert", "revise", "invalidate")
 # Clock skew between the proposing machine and this one.
 FUTURE_TOLERANCE = timedelta(minutes=5)
@@ -225,15 +225,19 @@ def file_facts(
     valid_at: str = "",
     learned_at: str = "",
     supersedes_rejection: str = "",
+    said: str = "",
 ) -> dict:
     """Gate and queue one reviewable item: one fact, or several facts from one source.
 
+    ``said`` records the reviewer's own words when the fact is their statement. A new
+    fact that matches a ``workspace.auto_approve`` rule is queued already approved.
     Every refusal is a ``CommandError`` carrying the exit code a caller should use.
     """
     config = _config_for(domain)
     facts = [fact.strip() for fact in facts if fact.strip()]
     provenance, source, link = provenance.strip(), source.strip(), link.strip()
     supersedes, supersedes_rejection = supersedes.strip(), supersedes_rejection.strip()
+    said = said.strip()
     settings = config.workspace
     for refused, message in (
         (fact_type not in FACT_TYPES, f"fact type must be one of: {', '.join(FACT_TYPES)}"),
@@ -241,14 +245,15 @@ def file_facts(
         (not facts, "fact text must not be empty"),
         (operation != "assert" and not supersedes, f"{operation} requires --supersedes"),
         (
-            len(facts) > 1 and not (provenance or source or link),
-            "a bundle names the one source its facts come from: --provenance, --source or --link",
+            len(facts) > 1 and not (provenance or source or link or said),
+            "a bundle names the one source its facts come from: "
+            "--provenance, --source, --link or --said",
         ),
         (settings.require_source and not (source and link), SOURCE_REQUIRED),
     ):
         if refused:
             raise CommandError(message, code=EXIT_REJECTED)
-    _refuse_secrets(*facts, supersedes, provenance, source, link, subject="fact")
+    _refuse_secrets(*facts, supersedes, provenance, source, link, said, subject="fact")
     item = _new_item(
         domain,
         fact_type,
@@ -260,6 +265,8 @@ def file_facts(
     )
     if supersedes_rejection:
         item["supersedes_rejection"] = supersedes_rejection
+    if said:
+        item["said"] = said
     for fact in facts:
         _check_fact(domain, fact, supersedes_rejection=supersedes_rejection, settings=settings)
     item.update(
@@ -269,8 +276,27 @@ def file_facts(
         supersedes=supersedes,
         status="pending",
     )
+    rule = _approving_rule(item, settings.auto_approve)
+    if rule is not None:
+        _approve(item, by=f"policy:{rule.fact_type}:{rule.require}")
     append_locked("pending.jsonl", item)
     return item
+
+
+def _approve(item: dict, *, by: str | None = None, at: str | None = None) -> None:
+    """Approve an item, bound to the digest of the content approved; ``by`` names a rule."""
+    item.update(status="approved", decided_at=at or datetime.now(timezone.utc).isoformat())
+    if by:
+        item["decided_by"] = by
+    item["approved_digest"] = content_digest(item)
+
+
+def _approving_rule(item: dict, rules: list[Any]) -> Any:
+    """The first rule that approves a new fact at filing. Corrections, and a fact filed
+    over a person's rejection, always wait for a person."""
+    if item["operation"] != "assert" or item.get("supersedes_rejection"):
+        return None
+    return next((rule for rule in rules if rule.approves(item)), None)
 
 
 def retire_facts(
@@ -339,27 +365,36 @@ def _rewrite(change: Callable[[dict], bool]) -> None:
         _write("pending.jsonl", remaining)
 
 
+def _decidable(item: dict, status: str) -> bool:
+    """Whether a reviewer can now give ``item`` the ``status`` approved or rejected."""
+    if item.get("status") == "pending":
+        return True
+    if item.get("status") != "approved":
+        return False
+    if status == "approved":
+        # Re-approving binds an approval that predates content digests.
+        return "approved_digest" not in item
+    # An approved item can still be rejected, whoever approved it, until a drain has
+    # claimed it or landed any of its facts.
+    return not item.get("draining_at") and not item.get("landed")
+
+
 def _human_set_status(ids: set[str], status: str, *, reason: str = "") -> dict[str, Any]:
     """Approve or reject. An approval is bound to the digest of the content it saw."""
     decided: set[str] = set()
     now = datetime.now(timezone.utc).isoformat()
 
     def decide(item: dict) -> bool:
-        decidable = item.get("id") in ids and (
-            item.get("status") == "pending"
-            or (
-                status == "approved"
-                and item.get("status") == "approved"
-                and "approved_digest" not in item
-            )
-        )
-        if not decidable:
+        if item.get("id") not in ids or not _decidable(item, status):
             return False
-        item.update(status=status, decided_at=now)
         decided.add(item["id"])
         if status == "approved":
-            item["approved_digest"] = content_digest(item)
+            _approve(item, at=now)
             return False
+        item.update(status=status, decided_at=now)
+        # The rejection is the reviewer's; drop any earlier approval and its binding.
+        item.pop("approved_digest", None)
+        item["decided_by"] = "reviewer"
         if reason.strip():
             item["reason"] = reason.strip()
         # Rejections leave the queue for the archive, where the rejection gate reads them.
@@ -389,6 +424,8 @@ def _provenance(item: dict) -> str:
         parts.append(f"link: {item['link']}")
     if item.get("learned_at"):
         parts.append(f"learned_at: {item['learned_at']}")
+    if item.get("said"):
+        parts.append(f"said: {item['said']}")
     return "; ".join(parts)
 
 
@@ -429,7 +466,7 @@ def _planned(item: dict) -> list[dict]:
     binding = _binding_error(item) or "ok"
     return [
         {"id": item["id"], "domain": item["domain"], "body": body, "valid_at": valid_at,
-         "binding": binding}
+         "binding": binding, "decided_by": item.get("decided_by", "reviewer")}
         for body, valid_at in changes
     ]
 
@@ -441,6 +478,27 @@ def _binding_error(item: dict) -> str | None:
     if recorded != content_digest(item):
         return "content changed after approval; approve it again after review"
     return None
+
+
+def _claim(item: dict) -> bool:
+    """Under the lock, mark an item as being drained if it is still approved with the
+    content the drain read. A claimed item can no longer be rejected."""
+    claimed = False
+
+    def change(queued: dict) -> bool:
+        nonlocal claimed
+        if (
+            queued.get("id") == item["id"]
+            and queued.get("status") == "approved"
+            and queued.get("approved_digest") == item.get("approved_digest")
+            and _binding_error(queued) is None
+        ):
+            queued.setdefault("draining_at", datetime.now(timezone.utc).isoformat())
+            claimed = True
+        return False
+
+    _rewrite(change)
+    return claimed
 
 
 def _update(item_id: str, *, archive: bool = False, **fields: Any) -> None:
@@ -475,6 +533,8 @@ async def drain(*, apply: bool) -> dict:
         if error:
             failures.append({"id": item["id"], "domain": item["domain"], "error": error})
             continue
+        if not _claim(item):
+            continue  # rejected or changed since this drain read the queue
         if item["operation"] == "retire":
             outcome = await retire_edges(
                 item["domain"],
@@ -594,6 +654,7 @@ def main() -> None:
             lines = [
                 f"would ingest {item['id']} [{item['domain']}] {item['body'][:80]}"
                 + ("" if item["binding"] == "ok" else f" (refused: {item['binding']})")
+                + ("" if item["decided_by"] == "reviewer" else f" ({item['decided_by']})")
                 for item in result["planned"]
             ]
             return [*lines, "dry run; add --apply"]

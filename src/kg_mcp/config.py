@@ -130,6 +130,30 @@ class GraphConfig(BaseModel):
         return self
 
 
+# What kind of claim a proposal makes. A belief is an inference; the others rest on a
+# record, an event or a live observation, so only they can be approved by a rule.
+FACT_TYPES = ("belief", "source-fact", "action-record", "live-finding")
+
+
+class AutoApproveRule(BaseModel):
+    """Approve a new fact at filing when its type and its evidence match.
+
+    ``source-link`` needs ``--source`` and ``--link``: the record is the proof.
+    ``said`` needs ``--said``: the words of the person who reviews the queue.
+    """
+
+    fact_type: Literal[FACT_TYPES[1:]]  # type: ignore[valid-type]
+    require: Literal["source-link", "said"]
+
+    def approves(self, item: dict[str, Any]) -> bool:
+        """Whether a new fact of this type carries the evidence this rule requires."""
+        if item.get("fact_type") != self.fact_type:
+            return False
+        if self.require == "said":
+            return bool(item.get("said"))
+        return bool(item.get("source") and item.get("link"))
+
+
 class WorkspaceConfig(BaseModel):
     # One sentence per proposal, so a later revise or invalidate replaces exactly one fact.
     # `kg bundle` files several facts of one source under one approval.
@@ -139,6 +163,9 @@ class WorkspaceConfig(BaseModel):
     reject_similarity: float = Field(default=0.75, gt=0, le=1)
     # Refuse proposals that name no source system and link to the record.
     require_source: bool = False
+    # Empty by default: every proposal waits for a person. An agent's inference (a
+    # belief) cannot be listed, and retire, revise and invalidate always wait.
+    auto_approve: list[AutoApproveRule] = Field(default_factory=list)
 
 
 class OpenAIConfig(BaseModel):

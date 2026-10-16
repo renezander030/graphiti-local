@@ -452,6 +452,7 @@ def test_a_dry_run_plans_exactly_the_facts_still_to_land(configured, monkeypatch
             "body": "Aurora runs in Frankfurt.",
             "valid_at": item["valid_at"],
             "binding": "ok",
+            "decided_by": "reviewer",
         }
     ]
     retry = Ingest(1)

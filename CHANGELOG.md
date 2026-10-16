@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.0
+
+This release lets a configured rule approve the facts whose evidence speaks for itself,
+while every inference and every correction still waits for a person.
+
+### Added
+
+- `workspace.auto_approve` (empty by default) lists rules that approve a new fact at
+  filing: `{fact_type: source-fact, require: source-link}` approves a fact that names
+  its `--source` and `--link`; `{fact_type: action-record, require: said}` approves one
+  that carries the reviewer's own words. `belief` cannot be listed, and `revise`,
+  `invalidate` and `retire` always wait, and so does a fact filed with
+  `--supersedes-rejection`. A `said` rule trusts the caller to pass the reviewer's
+  words. An approved item records `decided_by`
+  (`policy:<type>:<require>`) and is bound to its content digest like a reviewer's
+  approval.
+- `kg propose` and `kg bundle` take `--said "..."`: the reviewer's own words when the
+  fact is their statement. The words are part of the approved digest, pass the secret
+  gate, travel into the episode provenance and name a bundle's source.
+- The drain dry run reports `decided_by` for each planned item: the rule, or `reviewer`.
+
+### Changed
+
+- `kg-workspace reject` also rejects an approved item, whoever approved it, until a
+  drain claims it. It used to refuse anything but a pending item. The drain now claims
+  each item under the workspace lock just before its first write and skips an item
+  rejected or changed since it read the queue; an item with a landed fact can no longer
+  be rejected. A rejection records `decided_by: reviewer` and drops the approval digest.
+
 ## 0.8.0
 
 This release adds precise retirement of wrong facts, keeps the review queue readable

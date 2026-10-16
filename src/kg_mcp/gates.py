@@ -112,6 +112,7 @@ CONTENT_FIELDS = (
     "supersedes",
     "supersedes_rejection",
     "edges",
+    "said",
     "valid_at",
     "learned_at",
 )

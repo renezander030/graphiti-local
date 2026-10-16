@@ -24,7 +24,7 @@ kg status
 kg pending [group]
 kg propose GROUP "fact" --type source-fact --provenance "source"
            [--source SYSTEM --link URL] [--valid-at ISO] [--learned-at ISO]
-           [--supersedes-rejection ID]
+           [--supersedes-rejection ID] [--said "the reviewer's words"]
 kg bundle GROUP --fact "fact" --fact "fact" [same options as propose]
 kg retire GROUP --edge UUID [--edge UUID] --reason "why" [--valid-at ISO]
           [--source SYSTEM --link URL]
@@ -76,7 +76,28 @@ workspace:
   atomic_proposals: true
   reject_similarity: 0.75
   require_source: false
+  auto_approve: []
 ```
+
+Every proposal waits for a person unless `workspace.auto_approve` lists a rule for it.
+A rule approves a new fact at filing when its type and its evidence match:
+
+```yaml
+workspace:
+  auto_approve:
+    - {fact_type: source-fact, require: source-link}   # named --source and --link
+    - {fact_type: action-record, require: said}        # the reviewer's own --said words
+```
+
+`fact_type` is `source-fact`, `action-record` or `live-finding`; a `belief` (an
+inference) cannot be listed. `revise`, `invalidate` and `retire` always wait, whatever
+their evidence. A rule's approval records `decided_by: policy:<type>:<require>`, is
+bound to the content digest like a reviewer's, and shows in the drain dry run.
+A fact filed with `--supersedes-rejection` always waits for a person. A `said` rule
+trusts the caller to pass the reviewer's own words, so list it only where the caller is
+the reviewer's own session. `kg-workspace reject ID` still stops an approved item until
+a drain claims it; a drain claims each item under the workspace lock just before its
+first write, and an item with a landed fact can no longer be rejected (retire it).
 
 ## Built for unattended use
 
