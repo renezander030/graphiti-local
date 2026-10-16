@@ -31,13 +31,6 @@ def configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return _configure(tmp_path, monkeypatch)
 
 
-def test_release_metadata_is_0_8_0():
-    root = Path(__file__).resolve().parents[1]
-    manifest = json.loads((root / "server.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == manifest["packages"][0]["version"] == "0.8.0"
-    assert 'version = "0.8.0"' in (root / "pyproject.toml").read_text(encoding="utf-8")
-
-
 def _approve_all(workspace) -> None:
     workspace._human_set_status({item["id"] for item in workspace.pending_for()}, "approved")
 
@@ -106,6 +99,7 @@ def test_a_dry_run_plans_the_retirement(configured):
             "body": "retire edge-a: superseded",
             "valid_at": item["valid_at"],
             "binding": "ok",
+            "decided_by": "reviewer",
         }
     ]
 

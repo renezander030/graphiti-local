@@ -57,6 +57,7 @@ def _propose_command(args: argparse.Namespace) -> dict[str, Any]:
         "valid_at": args.valid_at,
         "learned_at": args.learned_at,
         "supersedes_rejection": args.supersedes_rejection,
+        "said": args.said,
     }
     if args.command == "bundle":
         from kg_mcp.workspace import add_bundle
@@ -82,7 +83,7 @@ def _queued(item: dict[str, Any]) -> dict[str, Any]:
         "operation": item["operation"],
         "status": item["status"],
     }
-    for key in ("facts", "edges", "valid_at", "learned_at", "source", "link"):
+    for key in ("facts", "edges", "valid_at", "learned_at", "source", "link", "decided_by"):
         if key in item:
             payload[key] = item[key]
     return payload
@@ -340,6 +341,8 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
         ]
     if command in ("propose", "bundle"):
         head = f"proposed {payload['proposed']} [{payload['domain']} {payload['fact_type']}]"
+        if payload["status"] == "approved":
+            head += f" approved by {payload['decided_by']}"
         return [head, *(f"  - {fact}" for fact in payload.get("facts", []))]
     if command == "retire":
         head = f"proposed {payload['proposed']} [{payload['domain']} retire]"
@@ -495,6 +498,11 @@ def parser() -> argparse.ArgumentParser:
             "--supersedes-rejection",
             default="",
             help="id of a rejected proposal this one knowingly resembles",
+        )
+        command.add_argument(
+            "--said",
+            default="",
+            help="the reviewer's own words when the fact is their statement",
         )
     retire = commands.add_parser(
         "retire",
