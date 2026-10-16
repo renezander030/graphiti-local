@@ -70,6 +70,11 @@ def _propose_command(args: argparse.Namespace) -> dict[str, Any]:
             supersedes=args.supersedes,
             **common,
         )
+    return _queued(item)
+
+
+def _queued(item: dict[str, Any]) -> dict[str, Any]:
+    """What ``propose``, ``bundle`` and ``retire`` print about the item they queued."""
     payload = {
         "proposed": item["id"],
         "domain": item["domain"],
@@ -77,10 +82,26 @@ def _propose_command(args: argparse.Namespace) -> dict[str, Any]:
         "operation": item["operation"],
         "status": item["status"],
     }
-    for key in ("facts", "valid_at", "learned_at", "source", "link"):
+    for key in ("facts", "edges", "valid_at", "learned_at", "source", "link"):
         if key in item:
             payload[key] = item[key]
     return payload
+
+
+def _retire_command(args: argparse.Namespace) -> dict[str, Any]:
+    from kg_mcp.workspace import retire_facts
+
+    item = retire_facts(
+        args.group,
+        args.edge,
+        reason=args.reason,
+        provenance=args.provenance,
+        source=args.source,
+        link=args.link,
+        valid_at=args.valid_at,
+        learned_at=args.learned_at,
+    )
+    return _queued(item)
 
 
 def _doctor_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -246,10 +267,11 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                 "export",
             )
         if args.command == "duplicates":
-            from kg_mcp.duplicates import find_duplicates
+            from kg_mcp.duplicates import find_duplicates, find_fact_duplicates
 
+            report = find_fact_duplicates if args.facts else find_duplicates
             return await bounded(
-                find_duplicates(graph, settings, groups or settings.graph.groups, limit=args.limit),
+                report(graph, settings, groups or settings.graph.groups, limit=args.limit),
                 timeout,
                 "duplicates",
             )
@@ -319,6 +341,9 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
     if command in ("propose", "bundle"):
         head = f"proposed {payload['proposed']} [{payload['domain']} {payload['fact_type']}]"
         return [head, *(f"  - {fact}" for fact in payload.get("facts", []))]
+    if command == "retire":
+        head = f"proposed {payload['proposed']} [{payload['domain']} retire]"
+        return [head, *(f"  - {edge}" for edge in payload["edges"])]
     if command in ("doctor", "verify"):
         mark = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}
         lines = [
@@ -331,6 +356,19 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
             f"exported {payload['nodes']} node(s) and {payload['edges']} edge(s) "
             f"from {', '.join(payload['groups'])} to {payload['output']}"
         ]
+    if command == "duplicates" and "facts" in payload:
+        lines = []
+        for item in payload["clusters"]:
+            lines.append(f"{item['count']}x {item['fact']}")
+            lines.extend(
+                f"   {member['uuid']}  [{member['group_id']}] {member['created_at'] or ''}"
+                for member in item["members"]
+            )
+        lines.append(
+            f"({payload['duplicates']} facts in {len(payload['clusters'])} cluster(s) "
+            f"out of {payload['facts']})"
+        )
+        return lines
     if command == "duplicates":
         lines = []
         for item in payload["clusters"]:
@@ -352,6 +390,8 @@ async def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return await _pending_command(args)
     if args.command in ("propose", "bundle"):
         return _propose_command(args)
+    if args.command == "retire":
+        return _retire_command(args)
     if args.command == "doctor":
         return _doctor_command(args)
     if args.command == "verify":
@@ -456,6 +496,25 @@ def parser() -> argparse.ArgumentParser:
             default="",
             help="id of a rejected proposal this one knowingly resembles",
         )
+    retire = commands.add_parser(
+        "retire",
+        parents=[common],
+        help="propose that the named facts are no longer true; a reviewer approves it",
+    )
+    retire.add_argument("group")
+    retire.add_argument(
+        "--edge", action="append", required=True, default=[], help="uuid of a fact to retire"
+    )
+    retire.add_argument("--reason", required=True, help="why these facts are no longer true")
+    retire.add_argument("--provenance", "--prov", default="")
+    retire.add_argument("--source", default="", help="the system the reason comes from")
+    retire.add_argument("--link", default="", help="a link to the record in that system")
+    retire.add_argument(
+        "--valid-at", default="", help="ISO date or datetime the facts stopped being true"
+    )
+    retire.add_argument(
+        "--learned-at", default="", help="ISO date or datetime this was observed"
+    )
     propose.add_argument(
         "--operation",
         "--op",
@@ -483,6 +542,11 @@ def parser() -> argparse.ArgumentParser:
     )
     duplicates.add_argument("groups", nargs="*")
     duplicates.add_argument("--limit", type=int, default=50, help="clusters to report")
+    duplicates.add_argument(
+        "--facts",
+        action="store_true",
+        help="report facts repeated between the same two entities instead of entity names",
+    )
     verify = commands.add_parser("verify", parents=[common])
     verify.add_argument("--offline", action="store_true")
     verify.add_argument("--query", default="graphiti local verification probe")

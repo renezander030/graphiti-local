@@ -63,13 +63,6 @@ def _drain(monkeypatch, ingest: Ingest) -> dict:
     return asyncio.run(workspace.drain(apply=True))
 
 
-def test_release_metadata_is_0_7_0():
-    root = Path(__file__).resolve().parents[1]
-    manifest = json.loads((root / "server.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == manifest["packages"][0]["version"] == "0.7.0"
-    assert 'version = "0.7.0"' in (root / "pyproject.toml").read_text(encoding="utf-8")
-
-
 # --- an approved proposal that yields no fact is not reported as landed ---
 
 

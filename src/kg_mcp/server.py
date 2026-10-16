@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from kg_mcp import queries
 from kg_mcp.config import (
@@ -28,6 +30,10 @@ from kg_mcp.config import (
 from kg_mcp.runtime import bounded
 
 logger = logging.getLogger(__name__)
+# Every tool only reads, and repeating a call changes nothing, so clients may run it unasked.
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
 _request_group_scope: ContextVar[frozenset[str] | None] = ContextVar(
     "request_group_scope", default=None
 )
@@ -148,6 +154,26 @@ def transport_security(settings: Settings | None):
     )
 
 
+class StrictFastMCP(FastMCP):
+    """Refuse a tool argument the tool does not declare instead of silently ignoring it.
+
+    A misspelled scope (``group_id`` for ``group_ids``) would otherwise read the default
+    groups and return plausible results from the wrong scope.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None:
+            declared = set(tool.parameters.get("properties") or {})
+            unknown = sorted(set(arguments or {}) - declared)
+            if unknown:
+                raise ToolError(
+                    f"unknown argument(s) for {name}: {', '.join(unknown)}; "
+                    f"it accepts: {', '.join(sorted(declared)) or 'no arguments'}"
+                )
+        return await super().call_tool(name, arguments)
+
+
 def create_server(settings: Settings | None = None) -> FastMCP:
     state: dict[str, Any] = {}
 
@@ -168,7 +194,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             for graph in graphs.values():
                 await graph.close()
 
-    mcp = FastMCP(
+    mcp = StrictFastMCP(
         "Graphiti Local",
         instructions="Read-only access to an allow-listed temporal knowledge graph.",
         host=settings.server.host if settings else "127.0.0.1",
@@ -228,7 +254,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             except LookupError:
                 continue
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def search_nodes(
         query: str,
         group_ids: str | list[str] | None = None,
@@ -257,6 +283,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             nodes = [_node(node) for node in found]
             return {
                 "message": "Nodes retrieved successfully" if nodes else "No relevant nodes found",
+                "groups": granted_groups(group_ids, active),
                 "nodes": nodes,
                 "retrieval": retrieval,
             }
@@ -264,7 +291,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             logger.exception("node search failed")
             return {"error": f"Error searching nodes: {exc}"}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def search_memory_facts(
         query: str,
         group_ids: str | list[str] | None = None,
@@ -306,6 +333,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             facts = [_edge(edge, score) for edge, score in ranked]
             return {
                 "message": "Facts retrieved successfully" if facts else "No relevant facts found",
+                "groups": granted_groups(group_ids, active),
                 "facts": facts,
                 "suppressed_invalidated": retrieval["suppressed"],
                 "retrieval": retrieval,
@@ -315,7 +343,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             logger.exception("fact search failed")
             return {"error": f"Error searching facts: {exc}"}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_entity_edge(uuid: str) -> dict[str, Any]:
         """Get one fact edge by UUID from an allow-listed graph."""
         try:
@@ -331,7 +359,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             logger.exception("edge lookup failed")
             return {"error": f"Error getting entity edge: {exc}"}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_episodes(
         group_ids: str | list[str] | None = None,
         max_episodes: int = 10,
@@ -340,7 +368,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         if max_episodes < 1:
             return {"error": "max_episodes must be a positive integer"}
         try:
-            graph, _, groups, timeout = runtime(group_ids)
+            graph, active, groups, timeout = runtime(group_ids)
             episodes = await bounded(
                 graph.retrieve_episodes(
                     reference_time=datetime.now(timezone.utc),
@@ -365,13 +393,14 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             ]
             return {
                 "message": "Episodes retrieved successfully" if results else "No episodes found",
+                "groups": granted_groups(group_ids, active),
                 "episodes": results,
             }
         except Exception as exc:
             logger.exception("episode lookup failed")
             return {"error": f"Error getting episodes: {exc}"}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_episode_entities(
         episode_uuids: list[str],
         group_id: str | None = None,
@@ -420,7 +449,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             logger.exception("episode provenance lookup failed")
             return {"error": f"Error getting episode entities: {exc}"}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     async def get_status() -> dict[str, Any]:
         """Check the server and its configured database connection."""
         try:

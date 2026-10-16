@@ -62,6 +62,9 @@ async def bounded(awaitable: Any, seconds: float, what: str) -> Any:
         ) from exc
 
 
+OPENAI_RERANKER_MODEL = "gpt-4.1-mini"
+
+
 def build_reranker(settings: Settings):
     """Choose a cross-encoder. 'passthrough' stays the default: it costs no extra call.
 
@@ -80,10 +83,13 @@ def build_reranker(settings: Settings):
 
     from graphiti_core.llm_client.config import LLMConfig
 
+    # graphiti-core's OpenAI reranker default, gpt-4.1-nano, is retired on 2026-10-23;
+    # gpt-4.1-mini accepts the same request unchanged.
+    default = OPENAI_RERANKER_MODEL if provider == "openai" else None
     config = LLMConfig(
         api_key=settings.reranker.api_key or None,
         base_url=settings.reranker.api_url or None,
-        model=settings.reranker.model or None,
+        model=settings.reranker.model or default,
     )
     if provider == "openai":
         from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient

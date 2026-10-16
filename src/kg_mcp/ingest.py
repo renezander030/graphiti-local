@@ -262,15 +262,16 @@ def completed_keys() -> set[str]:
     if not path.exists():
         return set()
     keys = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(entry, dict) and entry.get("key"):
-            keys.add(entry["key"])
+    with path.open(encoding="utf-8") as handle:  # not splitlines(): see workspace._read
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict) and entry.get("key"):
+                keys.add(entry["key"])
     return keys
 
 
@@ -510,6 +511,45 @@ async def ingest_records(
         "planned": [],
         "receipts": receipts,
     }
+
+
+async def retire_edges(
+    domain: str, edges: list[str], *, ended: datetime | None = None
+) -> dict[str, list[str]]:
+    """Mark the named fact edges of a group invalid as of ``ended`` (default: now).
+
+    All or nothing: if one edge is not found in the group, nothing is written and the
+    missing uuids are returned. Edges that are already invalid are left as they are.
+    """
+    from graphiti_core.edges import EntityEdge
+
+    from kg_mcp.config import settings_for_group
+    from kg_mcp.queries import group_scopes
+    from kg_mcp.runtime import writing
+
+    now = datetime.now(timezone.utc)
+    settings = settings_for_group(load_config(), domain)
+    # Retiring adds no vector, so the embedder record neither gates nor changes.
+    async with writing(settings, track_fingerprint=False) as session:
+        found: dict[str, tuple[Any, Any]] = {}
+        for driver, ids in group_scopes(session.graph, settings, [domain]):
+            for edge in await EntityEdge.get_by_uuids(driver, list(edges)):
+                if (edge.group_id or "") in ids:
+                    found.setdefault(edge.uuid, (edge, driver))
+        missing = [uuid_ for uuid_ in edges if uuid_ not in found]
+        if missing:
+            return {"retired": [], "already_invalid": [], "missing": missing}
+        retired, already_invalid = [], []
+        for edge, driver in found.values():
+            if edge.invalid_at is not None:
+                already_invalid.append(edge.uuid)
+                continue
+            await edge.load_fact_embedding(driver)
+            edge.invalid_at, edge.expired_at = ended or now, now
+            await edge.save(driver)
+            retired.append(edge.uuid)
+        session.wrote = bool(retired)
+    return {"retired": retired, "already_invalid": already_invalid, "missing": []}
 
 
 async def stage_extraction(
