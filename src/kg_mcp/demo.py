@@ -125,18 +125,32 @@ async def _build(database: Path) -> int:
         await driver.close()
 
 
+def _engine_version() -> str:
+    from kg_mcp.ladybug import _alias_kuzu
+
+    return str(getattr(_alias_kuzu(), "__version__", "unknown"))
+
+
 def _ensure_graph(home: Path) -> Path:
-    """Build the graph once, then reuse it on later runs."""
+    """Build the graph once per engine version, then reuse it on later runs.
+
+    Ladybug installs its extensions per engine version, so a graph built by an older
+    release finds FTS and VECTOR missing after an upgrade and the read fails. The marker
+    records the engine that built the graph; any other engine rebuilds it from scratch.
+    """
     from kg_mcp.ladybug import setup_database
 
     database = home / "graph.ladybug"
     marker = home / ".built"
-    if marker.exists():
+    engine = _engine_version()
+    if marker.exists() and marker.read_text().split()[1:] == [engine]:
         return database
+    for stale in home.glob("graph.ladybug*"):
+        stale.unlink()
     home.mkdir(parents=True, exist_ok=True)
     setup_database(database, quiet=True)
     count = asyncio.run(_build(database))
-    marker.write_text(f"{count}\n")
+    marker.write_text(f"{count} {engine}\n")
     return database
 
 
