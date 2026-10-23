@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 from kg_mcp.config import FACT_TYPES
 from kg_mcp.gates import content_digest, rejected_matches, secret_shapes, sentences
@@ -27,6 +27,7 @@ from kg_mcp.output import (
 OPERATIONS = ("assert", "revise", "invalidate")
 # Clock skew between the proposing machine and this one.
 FUTURE_TOLERANCE = timedelta(minutes=5)
+DRAIN_BUSY = "another drain is running"
 
 
 def workspace_dir(settings: Any = None) -> Path:
@@ -97,11 +98,25 @@ def append_locked(name: str, item: dict, *, sort_keys: bool = False) -> None:
         _append(name, item, sort_keys=sort_keys)
 
 
-def pending_for(groups: list[str] | None = None) -> list[dict]:
-    pending = [item for item in _read() if item.get("status") == "pending"]
+def pending_for(groups: list[str] | None = None, *, status: str = "pending") -> list[dict]:
+    """Queued items with ``status``: ``pending`` awaits a reviewer, ``approved`` a drain."""
+    pending = [item for item in _read() if item.get("status") == status]
     if groups is None:
         return pending
     return [item for item in pending if item.get("domain") in groups]
+
+
+def drained(item_id: str) -> dict:
+    """An archived proposal whose facts a drain landed, with the episodes it produced."""
+    for item in _read("archive.jsonl"):
+        if item.get("id") == item_id and item.get("status") == "approved":
+            if item.get("operation") == "retire" or not item.get("episodes"):
+                break
+            return item
+    raise CommandError(
+        f"{item_id} is not a drained proposal with landed facts; only those can be retracted",
+        code=EXIT_REJECTED,
+    )
 
 
 def rejected_for(groups: list[str] | None = None) -> list[dict]:
@@ -309,11 +324,13 @@ def retire_facts(
     link: str = "",
     valid_at: str = "",
     learned_at: str = "",
+    retracts: str = "",
 ) -> dict:
     """Queue one reviewable item that retires the named fact edges, with no replacement.
 
     Once approved, ``drain`` marks exactly these edges invalid as of ``valid_at`` (when
-    the facts stopped being true; the drain time if omitted). Refusals are ``CommandError``.
+    the facts stopped being true; the drain time if omitted). ``retracts`` names the
+    drained proposal whose facts these are. Refusals are ``CommandError``.
     """
     config = _config_for(domain)
     edges = list(dict.fromkeys(edge.strip() for edge in edges if edge.strip()))
@@ -337,6 +354,8 @@ def retire_facts(
         learned_at=learned_at,
     )
     item.update(operation="retire", text=reason, edges=edges, supersedes="", status="pending")
+    if retracts:
+        item["retracts"] = retracts
     append_locked("pending.jsonl", item)
     return item
 
@@ -515,17 +534,123 @@ def _update(item_id: str, *, archive: bool = False, **fields: Any) -> None:
     _rewrite(change)
 
 
+async def _land(record: dict) -> tuple[str | None, str | None]:
+    """Ingest one episode: ``(episode_uuid, None)`` once a fact landed, else
+    ``(None, reason)``. An extraction that produced no fact has not landed."""
+    from kg_mcp.ingest import ingest_records
+
+    result = await ingest_records([record], apply=True, resume=False)
+    if result["ingested"] != 1:
+        return None, result["failed"][0]["error"] if result["failed"] else "not ingested"
+    if not result["receipts"] or result["receipts"][0]["edges"] == 0:
+        return None, "extraction produced no facts from this proposal"
+    return result["receipts"][0]["episode_uuid"], None
+
+
+async def _drain_retire(item: dict) -> tuple[bool, list[dict]]:
+    """Retire all of what the reviewer approved or nothing, leaving the item approved.
+    Returns whether the item was archived, and its failures."""
+    from kg_mcp.ingest import retire_edges
+
+    outcome = await retire_edges(
+        item["domain"],
+        item["edges"],
+        ended=datetime.fromisoformat(item["valid_at"]) if item.get("valid_at") else None,
+    )
+    if outcome["missing"]:
+        return False, [
+            {
+                "id": item["id"],
+                "domain": item["domain"],
+                "error": "fact edge(s) not found in this group: " + ", ".join(outcome["missing"]),
+            }
+        ]
+    _update(item["id"], archive=True, **outcome)
+    return True, []
+
+
+async def _drain_facts(item: dict) -> tuple[bool, list[dict]]:
+    """Land each fact still to land. Archive only once every fact landed; a failure leaves
+    the proposal approved, with what did land recorded, so the next drain retries the rest."""
+    total = len(_texts(item))
+    landed = list(item.get("landed") or [])
+    episodes = list(item.get("episodes") or [])
+    failures = []
+    for index, record in _episodes(item):
+        episode, error = await _land(record)
+        if error:
+            failure = {"id": item["id"], "domain": item["domain"], "error": error}
+            if total > 1:
+                failure["fact"] = index + 1
+            failures.append(failure)
+            continue
+        landed.append(index)
+        episodes.append(episode)
+        if len(landed) < total:
+            _update(item["id"], landed=landed, episodes=episodes)
+    done = len(landed) == total
+    if done:
+        _update(item["id"], archive=True, landed=landed, episodes=episodes)
+    return done, failures
+
+
+def _release(item_id: str | None = None) -> int:
+    """Hand claims back to the reviewer: the item stays approved, and can be rejected again.
+
+    With ``item_id`` only that item is released, once a drain failed it; without it,
+    every claim a stopped drain left behind. An item with landed facts keeps its claim:
+    rejecting it would leave those facts in the graph unreviewed.
+    """
+    released = 0
+
+    def change(item: dict) -> bool:
+        nonlocal released
+        if (
+            (item_id is None or item.get("id") == item_id)
+            and item.get("status") == "approved"
+            and item.get("draining_at")
+            and not item.get("landed")
+        ):
+            item.pop("draining_at")
+            released += 1
+        return False
+
+    _rewrite(change)
+    return released
+
+
+def _drain_lock() -> FileLock:
+    workspace_dir().mkdir(parents=True, exist_ok=True)
+    return FileLock(str(_path(".drain.lock")), timeout=0)
+
+
 async def drain(*, apply: bool) -> dict:
-    approved = [item for item in _read() if item.get("status") == "approved"]
-    if not approved or not apply:
+    """Land every approved item. One drain runs at a time per workspace: a second one
+    returns at once with ``busy`` set. Claims a stopped drain left are released first."""
+    if not apply:
+        approved = [item for item in _read() if item.get("status") == "approved"]
         return {
             "applied": False,
             "ingested": 0,
             "failed": [],
             "planned": [row for item in approved for row in _planned(item)],
         }
+    lock = _drain_lock()
+    try:
+        lock.acquire()
+    except Timeout:
+        return {"applied": False, "ingested": 0, "failed": [], "planned": [], "busy": DRAIN_BUSY}
+    try:
+        _release()
+        return await _drain_approved()
+    finally:
+        lock.release()
 
-    from kg_mcp.ingest import ingest_records, retire_edges
+
+async def _drain_approved() -> dict:
+    approved = [item for item in _read() if item.get("status") == "approved"]
+    if not approved:
+        return {"applied": False, "ingested": 0, "failed": [], "planned": []}
 
     completed, failures = 0, []
     for item in approved:
@@ -535,52 +660,12 @@ async def drain(*, apply: bool) -> dict:
             continue
         if not _claim(item):
             continue  # rejected or changed since this drain read the queue
-        if item["operation"] == "retire":
-            outcome = await retire_edges(
-                item["domain"],
-                item["edges"],
-                ended=datetime.fromisoformat(item["valid_at"]) if item.get("valid_at") else None,
-            )
-            if outcome["missing"]:
-                # Retire all of what the reviewer approved or nothing; the item stays approved.
-                failures.append(
-                    {
-                        "id": item["id"],
-                        "domain": item["domain"],
-                        "error": "fact edge(s) not found in this group: "
-                        + ", ".join(outcome["missing"]),
-                    }
-                )
-                continue
-            _update(item["id"], archive=True, **outcome)
-            completed += 1
-            continue
-        total = len(_texts(item))
-        landed = list(item.get("landed") or [])
-        episodes = list(item.get("episodes") or [])
-        for index, record in _episodes(item):
-            result = await ingest_records([record], apply=True, resume=False)
-            # Archive only what actually landed. A failure, or an extraction that produced
-            # no fact, leaves the proposal approved so the next drain retries it.
-            if result["ingested"] != 1:
-                error = result["failed"][0]["error"] if result["failed"] else "not ingested"
-            elif not result["receipts"] or result["receipts"][0]["edges"] == 0:
-                error = "extraction produced no facts from this proposal"
-            else:
-                error = None
-            if error:
-                failure = {"id": item["id"], "domain": item["domain"], "error": error}
-                if total > 1:
-                    failure["fact"] = index + 1
-                failures.append(failure)
-                continue
-            landed.append(index)
-            episodes.append(result["receipts"][0]["episode_uuid"])
-            if len(landed) < total:
-                _update(item["id"], landed=landed, episodes=episodes)
-        if len(landed) == total:
-            _update(item["id"], archive=True, landed=landed, episodes=episodes)
-            completed += 1
+        land = _drain_retire if item["operation"] == "retire" else _drain_facts
+        done, failed = await land(item)
+        failures.extend(failed)
+        completed += done
+        if failed and not done:
+            _release(item["id"])
     return {"applied": True, "ingested": completed, "failed": failures, "planned": []}
 
 
@@ -592,6 +677,11 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     listing = subparsers.add_parser("list")
     listing.add_argument("domain", nargs="?")
+    listing.add_argument(
+        "--approved",
+        action="store_true",
+        help="list approved items still waiting for a drain, with who approved them",
+    )
     rejected = subparsers.add_parser("rejected", help="rejected proposals and their reasons")
     rejected.add_argument("domain", nargs="?")
     for command in ("approve", "reject"):
@@ -599,6 +689,10 @@ def main() -> None:
         decision.add_argument("ids", nargs="+")
         if command == "reject":
             decision.add_argument("--reason", default="", help="shown when a similar fact returns")
+        else:
+            decision.add_argument(
+                "--drain", action="store_true", help="land what was approved right away"
+            )
     drain_parser = subparsers.add_parser("drain")
     drain_parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
@@ -607,8 +701,14 @@ def main() -> None:
     if args.command in ("list", "rejected"):
         groups = [args.domain] if args.domain else None
         with refusals(as_json=as_json):
-            items = pending_for(groups) if args.command == "list" else rejected_for(groups)
-        payload = {"pending" if args.command == "list" else "rejected": items}
+            if args.command == "rejected":
+                items = rejected_for(groups)
+            else:
+                items = pending_for(groups, status="approved" if args.approved else "pending")
+        key = "rejected" if args.command == "rejected" else "pending"
+        if args.command == "list" and args.approved:
+            key = "approved"
+        payload = {key: items}
 
         def human() -> list[str]:
             if args.command == "rejected":
@@ -621,9 +721,10 @@ def main() -> None:
             lines = [
                 f"{item['id']} [{item['domain']} {item['fact_type']} {item['operation']}] "
                 f"{item['text']}"
+                + (f" (approved by {item.get('decided_by', 'reviewer')})" if args.approved else "")
                 for item in items
             ]
-            return [*lines, f"({len(items)} pending)"]
+            return [*lines, f"({len(items)} {key})"]
 
         emit(payload, human=human, as_json=as_json)
         return
@@ -633,37 +734,46 @@ def main() -> None:
             result = _human_set_status(
                 set(args.ids), status, reason=getattr(args, "reason", "") or ""
             )
+            if getattr(args, "drain", False) and result["changed"]:
+                result["drain"] = asyncio.run(drain(apply=True))
 
         def decision_human() -> list[str]:
             lines = [f"{result['changed']} proposal(s) {status}"]
             lines.extend(f"unknown or already decided: {item}" for item in result["unknown"])
+            if "drain" in result:
+                lines.extend(_drain_lines(result["drain"]))
             return lines
 
         emit(result, human=decision_human, as_json=as_json)
         if result["unknown"]:
             raise SystemExit(EXIT_REJECTED)
+        if result.get("drain", {}).get("failed"):
+            raise SystemExit(1)
         return
 
     with refusals(as_json=as_json):
         result = asyncio.run(drain(apply=args.apply))
-
-    def drain_human() -> list[str]:
-        if not result["applied"]:
-            if not result["planned"]:
-                return ["nothing approved"]
-            lines = [
-                f"would ingest {item['id']} [{item['domain']}] {item['body'][:80]}"
-                + ("" if item["binding"] == "ok" else f" (refused: {item['binding']})")
-                + ("" if item["decided_by"] == "reviewer" else f" ({item['decided_by']})")
-                for item in result["planned"]
-            ]
-            return [*lines, "dry run; add --apply"]
-        lines = [f"{result['ingested']} proposal(s) ingested"]
-        lines.extend(
-            f"FAILED {item['id']} [{item['domain']}]: {item['error']}" for item in result["failed"]
-        )
-        return lines
-
-    emit(result, human=drain_human, as_json=as_json)
+    emit(result, human=lambda: _drain_lines(result), as_json=as_json)
     if result["failed"]:
         raise SystemExit(1)
+
+
+def _drain_lines(result: dict) -> list[str]:
+    """The reader-friendly form of a drain result."""
+    if result.get("busy"):
+        return [result["busy"]]
+    if not result["applied"]:
+        if not result["planned"]:
+            return ["nothing approved"]
+        lines = [
+            f"would ingest {item['id']} [{item['domain']}] {item['body'][:80]}"
+            + ("" if item["binding"] == "ok" else f" (refused: {item['binding']})")
+            + ("" if item["decided_by"] == "reviewer" else f" ({item['decided_by']})")
+            for item in result["planned"]
+        ]
+        return [*lines, "dry run; add --apply"]
+    lines = [f"{result['ingested']} proposal(s) ingested"]
+    lines.extend(
+        f"FAILED {item['id']} [{item['domain']}]: {item['error']}" for item in result["failed"]
+    )
+    return lines

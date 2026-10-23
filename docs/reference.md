@@ -28,6 +28,7 @@ kg propose GROUP "fact" --type source-fact --provenance "source"
 kg bundle GROUP --fact "fact" --fact "fact" [same options as propose]
 kg retire GROUP --edge UUID [--edge UUID] --reason "why" [--valid-at ISO]
           [--source SYSTEM --link URL]
+kg retire GROUP --proposal ID --reason "why" [same options]
 kg doctor [--offline]
 kg export [group ...] [--output PATH]
 kg duplicates [group ...] [--facts]
@@ -55,7 +56,7 @@ Before anything is queued, a proposal passes these checks:
 | `2` | unconfigured group, malformed or future timestamp, or a missing `--source`/`--link` when `workspace.require_source` is set |
 | `4` | more than one sentence (`workspace.atomic_proposals`, default on) |
 | `5` | shares at least `workspace.reject_similarity` (default 0.75) of its words with a rejected proposal in the same group; `--supersedes-rejection ID` acknowledges it |
-| `6` | carries an API key, token, private key, credential assignment or IBAN shape; the value is never echoed |
+| `6` | carries an API key, token, private key, credential assignment or IBAN shape; the value is never echoed. Recognized keys include OpenAI, Anthropic, GitHub, GitLab, Slack, AWS (long-term and temporary), Google, Hugging Face, npm, PyPI, Stripe, DigitalOcean, SendGrid and Shopify |
 
 `kg-workspace reject ID --reason "..."` moves the proposal to `archive.jsonl` with its
 reason, which the refusal above prints; `kg-workspace rejected [group]` lists them.
@@ -70,6 +71,20 @@ and `kg edge` print) and why they are no longer true. Once approved, the drain m
 exactly those edges invalid as of `--valid-at` (the drain time if omitted), with no
 replacement fact and no model call. If one named edge is not found in the group, nothing
 is retired and the item stays approved. `--edge` values are part of the approved digest.
+
+`kg retire GROUP --proposal ID` retracts a proposal that a drain already landed: it
+reads the episodes recorded in `archive.jsonl` for that proposal and files a retirement
+of the current facts those episodes alone produced. A fact another episode restates is
+kept, listed under `kept`, because another source still gives it. The retirement
+records `retracts: ID` and is reviewed like any other.
+
+`kg-workspace list --approved [group]` lists approved items still waiting for a drain,
+each with who approved it (`reviewer` or the `policy:` rule).
+`kg-workspace approve ID --drain` approves and lands in one step; it exits 1 when a
+fact does not land, like `drain --apply`.
+
+One drain runs at a time per workspace. A second `kg-workspace drain --apply` started
+while one runs returns at once with `busy: "another drain is running"` and exits 0.
 
 ```yaml
 workspace:
@@ -98,6 +113,9 @@ trusts the caller to pass the reviewer's own words, so list it only where the ca
 the reviewer's own session. `kg-workspace reject ID` still stops an approved item until
 a drain claims it; a drain claims each item under the workspace lock just before its
 first write, and an item with a landed fact can no longer be rejected (retire it).
+An item that fails to land with no fact landed goes back to the reviewer: it stays
+approved, the next drain retries it, and it can be rejected. A drain that stopped
+mid-run leaves its claims behind; the next drain releases them before it starts.
 
 ## Built for unattended use
 
@@ -219,7 +237,10 @@ one episode per source record. Empty and unsupported inputs fail explicitly.
 Ingestion is resumable. Each applied record is written to a content-keyed ledger in
 the workspace, so re-running the same file ingests only what has not landed yet
 instead of duplicating it. Each record has a content-derived episode UUID. Transient
-model and backend errors retry with bounded backoff; a record that still fails is
+model and backend errors, including rate limits and quota answers (HTTP 429,
+`RESOURCE_EXHAUSTED`, overloaded), retry with bounded backoff. An answer the model cut
+off at `llm.max_tokens` is not retried, since the same request is cut off again; the
+failure says to raise `llm.max_tokens` or split the episode. A record that still fails is
 isolated and reported, the rest of the batch lands, and the command exits non-zero.
 `ingest-receipts.jsonl` records canonical episode ids and node/edge counts;
 `ingest-failures.jsonl` records exhausted attempts for reconciliation. Use

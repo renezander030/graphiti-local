@@ -34,6 +34,11 @@ def _alias_kuzu() -> Any:
     return ladybug
 
 
+def engine_version() -> str:
+    """The installed Ladybug engine's version; extensions are installed per version."""
+    return str(getattr(_alias_kuzu(), "__version__", "unknown"))
+
+
 def group_database_path(directory: str | Path, group: str) -> Path:
     """The file that holds one group in the per-group layout.
 
@@ -69,7 +74,7 @@ def extension_status(database: str | Path | None = None) -> dict[str, Any]:
         database_handle.close()
     target = str(Path(database).expanduser().resolve()) if database else "PATH"
     return {
-        "engine_version": getattr(ladybug, "__version__", "unknown"),
+        "engine_version": engine_version(),
         "installed": [name for name in EXTENSIONS if name not in missing],
         "missing": missing,
         "ok": not missing,

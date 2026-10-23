@@ -132,6 +132,34 @@ def cap_llm_tokens(llm: Any, maximum: int) -> Any:
     return llm
 
 
+class OutputTruncatedError(Exception):
+    """The model stopped at its output ceiling, so its JSON answer is cut off.
+
+    Sending the same request again is cut off at the same place, so this is never
+    retried: raising ``llm.max_tokens`` or splitting the episode is the fix.
+    """
+
+
+def refuse_truncated_output(llm: Any) -> Any:
+    """Raise :class:`OutputTruncatedError` when a completion ends on the token ceiling,
+    instead of handing a cut-off JSON body to a parser that would retry it."""
+    completions = llm.client.chat.completions
+    create = completions.create
+
+    async def guarded(*args: Any, **kwargs: Any) -> Any:
+        response = await create(*args, **kwargs)
+        choices = getattr(response, "choices", None) or []
+        if choices and getattr(choices[0], "finish_reason", None) == "length":
+            raise OutputTruncatedError(
+                f"the model's answer reached max_tokens ({kwargs.get('max_tokens')}) and was "
+                "cut off; raise llm.max_tokens or split the episode"
+            )
+        return response
+
+    completions.create = guarded
+    return llm
+
+
 def build_llm(settings: Settings):
     """Build the extraction client selected by ``llm.api_mode``."""
     from graphiti_core.llm_client.config import LLMConfig
@@ -162,10 +190,12 @@ def build_llm(settings: Settings):
                     )
                 return response_format
 
-        llm = GraphitiLocalGenericClient(
-            config=llm_config,
-            max_tokens=settings.llm.max_tokens,
-            structured_output_mode=settings.llm.structured_output_mode,
+        llm = refuse_truncated_output(
+            GraphitiLocalGenericClient(
+                config=llm_config,
+                max_tokens=settings.llm.max_tokens,
+                structured_output_mode=settings.llm.structured_output_mode,
+            )
         )
     return cap_llm_tokens(llm, settings.llm.max_tokens)
 

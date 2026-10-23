@@ -45,13 +45,6 @@ class Ingest:
         return {"applied": True, "ingested": 1, "failed": [], "receipts": [receipt]}
 
 
-def test_release_metadata_is_0_9_0():
-    root = Path(__file__).resolve().parents[1]
-    manifest = json.loads((root / "server.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == manifest["packages"][0]["version"] == "0.9.0"
-    assert 'version = "0.9.0"' in (root / "pyproject.toml").read_text(encoding="utf-8")
-
-
 def test_without_rules_every_proposal_waits(tmp_path, monkeypatch):
     from kg_mcp import workspace
 

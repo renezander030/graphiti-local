@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -83,26 +85,65 @@ def _queued(item: dict[str, Any]) -> dict[str, Any]:
         "operation": item["operation"],
         "status": item["status"],
     }
-    for key in ("facts", "edges", "valid_at", "learned_at", "source", "link", "decided_by"):
+    for key in (
+        "facts", "edges", "retracts", "valid_at", "learned_at", "source", "link", "decided_by"
+    ):
         if key in item:
             payload[key] = item[key]
     return payload
 
 
-def _retire_command(args: argparse.Namespace) -> dict[str, Any]:
+async def _retire_command(args: argparse.Namespace) -> dict[str, Any]:
     from kg_mcp.workspace import retire_facts
 
+    edges, kept = list(args.edge or []), []
+    if args.proposal:
+        edges, kept = await _retracted_edges(args.group, args.proposal)
     item = retire_facts(
         args.group,
-        args.edge,
+        edges,
         reason=args.reason,
         provenance=args.provenance,
         source=args.source,
         link=args.link,
         valid_at=args.valid_at,
         learned_at=args.learned_at,
+        retracts=args.proposal or "",
     )
-    return _queued(item)
+    payload = _queued(item)
+    if args.proposal:
+        payload["kept"] = kept
+    return payload
+
+
+async def _retracted_edges(group: str, proposal: str) -> tuple[list[str], list[str]]:
+    """The facts a drained proposal landed that can be retired, and those kept because
+    another source restates them."""
+    from kg_mcp.config import per_group_ladybug, settings_for_group
+    from kg_mcp.output import EXIT_REJECTED
+    from kg_mcp.workspace import drained
+
+    item = drained(proposal)
+    if item["domain"] != group:
+        raise CommandError(
+            f"{proposal} was filed in {item['domain']}, not {group}", code=EXIT_REJECTED
+        )
+    settings = load_config()
+    allowed_groups(group, settings)
+    if per_group_ladybug(settings):
+        settings = settings_for_group(settings, group)
+    async with _read_only(settings) as graph:
+        only, shared = await bounded(
+            queries.episode_edges(graph, settings, [group], list(item["episodes"])),
+            settings.graph.query_timeout_seconds,
+            "retire",
+        )
+    if not only:
+        detail = f"; restated by another source: {', '.join(shared)}" if shared else ""
+        raise CommandError(
+            f"{proposal} has no current fact that only it supports{detail}", code=EXIT_REJECTED
+        )
+    return only, shared
 
 
 def _doctor_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -150,14 +191,23 @@ async def _each_group_file(args: argparse.Namespace, settings: Any) -> dict[str,
     raise CommandError(f"edge not found: {args.uuid}")
 
 
-async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str, Any]:
+@asynccontextmanager
+async def _read_only(settings: Any) -> AsyncIterator[Any]:
+    """The graph one command reads, opened read-only and always closed."""
     from kg_mcp.runtime import build_graphiti
 
+    graph = build_graphiti(settings, read_only=True)
+    try:
+        yield graph
+    finally:
+        await graph.close()
+
+
+async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str, Any]:
     timeout = settings.graph.query_timeout_seconds
     # Refuse a group outside the allow-list before any model client is built.
     groups = allowed_groups(getattr(args, "groups", None), settings)
-    graph = build_graphiti(settings, read_only=True)
-    try:
+    async with _read_only(settings) as graph:
         if args.command == "ask":
             results, retrieval = await bounded(
                 queries.search_facts(
@@ -237,7 +287,8 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
             edge, found_on = await queries.find_edge(
                 queries.graph_drivers(graph, settings), args.uuid, timeout, "edge"
             )
-            if edge is None:
+            # A fact of a group outside the allow-list reads as absent, as over MCP.
+            if edge is None or (edge.group_id and edge.group_id not in settings.graph.groups):
                 raise CommandError(f"edge not found: {args.uuid}")
             return {
                 "uuid": args.uuid,
@@ -277,8 +328,6 @@ async def _graph_command_on(args: argparse.Namespace, settings: Any) -> dict[str
                 "duplicates",
             )
         raise CommandError(f"unknown command: {args.command}")
-    finally:
-        await graph.close()
 
 
 async def _episode_sources(driver: Any, uuids: list[str], timeout: float) -> list[dict]:
@@ -287,12 +336,8 @@ async def _episode_sources(driver: Any, uuids: list[str], timeout: float) -> lis
         return []
     from graphiti_core.nodes import EpisodicNode
 
-    try:
-        episodes = await bounded(EpisodicNode.get_by_uuids(driver, uuids), timeout, "edge")
-    except TimeoutError:
-        raise
-    except Exception:
-        episodes = []
+    # A failed lookup is raised: an edge shown without its sources would read as unsourced.
+    episodes = await bounded(EpisodicNode.get_by_uuids(driver, uuids), timeout, "edge")
     by_uuid = {episode.uuid: episode for episode in episodes}
     return [
         {
@@ -346,7 +391,13 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
         return [head, *(f"  - {fact}" for fact in payload.get("facts", []))]
     if command == "retire":
         head = f"proposed {payload['proposed']} [{payload['domain']} retire]"
-        return [head, *(f"  - {edge}" for edge in payload["edges"])]
+        if payload.get("retracts"):
+            head += f" retracting {payload['retracts']}"
+        return [
+            head,
+            *(f"  - {edge}" for edge in payload["edges"]),
+            *(f"  kept (restated elsewhere): {edge}" for edge in payload.get("kept", [])),
+        ]
     if command in ("doctor", "verify"):
         mark = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}
         lines = [
@@ -394,7 +445,7 @@ async def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command in ("propose", "bundle"):
         return _propose_command(args)
     if args.command == "retire":
-        return _retire_command(args)
+        return await _retire_command(args)
     if args.command == "doctor":
         return _doctor_command(args)
     if args.command == "verify":
@@ -510,8 +561,12 @@ def parser() -> argparse.ArgumentParser:
         help="propose that the named facts are no longer true; a reviewer approves it",
     )
     retire.add_argument("group")
-    retire.add_argument(
-        "--edge", action="append", required=True, default=[], help="uuid of a fact to retire"
+    target = retire.add_mutually_exclusive_group(required=True)
+    target.add_argument("--edge", action="append", default=[], help="uuid of a fact to retire")
+    target.add_argument(
+        "--proposal",
+        default="",
+        help="id of a drained proposal: retire the facts it landed that no other source gives",
     )
     retire.add_argument("--reason", required=True, help="why these facts are no longer true")
     retire.add_argument("--provenance", "--prov", default="")

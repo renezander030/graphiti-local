@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.10.0
+
+This release makes the reviewed write path safe to run from more than one place,
+lets a reviewer take back a fact that was approved by mistake, and tightens what reads
+and the secret gate let through.
+
+### Added
+
+- `kg retire GROUP --proposal ID --reason "..."` retracts a drained proposal: it files
+  a retirement of the current facts that proposal's episodes alone produced, and lists
+  the facts another episode restates as `kept`. The item records `retracts: ID`.
+- `kg-workspace approve ID --drain` approves and lands in one step.
+- `kg-workspace list --approved` lists approved items waiting for a drain, with who
+  approved each one.
+
+### Changed
+
+- One drain runs at a time per workspace. A second `drain --apply` returns at once with
+  `busy: "another drain is running"` and exits 0, so a cron drain and a manual one can
+  no longer write the same item twice.
+- An item that fails to land with no fact landed goes back to the reviewer and can be
+  rejected; claims a stopped drain left behind are released by the next drain. Items
+  with a landed fact keep their claim.
+- `kg edge` shows only facts of the configured groups, as the MCP tool already did. A
+  backend failure is reported as an error instead of "edge not found", and a failed
+  episode lookup fails the command instead of showing the fact without its sources.
+- Ingestion retries rate-limit and quota answers (HTTP 429, `RESOURCE_EXHAUSTED`,
+  overloaded) with backoff, and no longer retries an answer the model cut off at
+  `llm.max_tokens`: that fails at once, naming the setting to raise.
+- The secret gate refuses current GitLab, npm, PyPI, Stripe, Google OAuth, Slack app,
+  AWS temporary, DigitalOcean, SendGrid and Shopify token formats.
+
+### Tidy-up
+
+- Four behavior-preserving refactors of the drain, the Ladybug engine version, the
+  ingest retry step and restore's group rule; no change to commands, options, output or
+  stored formats.
+
 ## 0.9.0
 
 This release lets a configured rule approve the facts whose evidence speaks for itself,

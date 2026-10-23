@@ -58,30 +58,31 @@ def read_snapshot(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return header, records
 
 
+def _named_group(
+    record: dict[str, Any], override: str | None, settings: Settings, choose: str
+) -> str:
+    """``--group`` or the record's own group, refused when absent or not allow-listed."""
+    group = override or str(record.get("group_id") or "")
+    if not group:
+        raise ValueError(
+            f"record {record.get('uuid')} has no group_id; pass --group to choose {choose}"
+        )
+    allowed_groups(group, settings)
+    return group
+
+
 def target_group(record: dict[str, Any], override: str | None, settings: Settings) -> str:
     if settings.database.provider == "ladybug":
         # Ladybug is single-graph; ingestion stores the empty group there.
         return ""
-    group = override or str(record.get("group_id") or "")
-    if not group:
-        raise ValueError(
-            f"record {record.get('uuid')} has no group_id; pass --group to choose the "
-            f"target group on {settings.database.provider}"
-        )
-    allowed_groups(group, settings)
-    return group
+    return _named_group(
+        record, override, settings, f"the target group on {settings.database.provider}"
+    )
 
 
 def file_group(record: dict[str, Any], override: str | None, settings: Settings) -> str:
     """The group whose file a record is restored into, with the per-group Ladybug layout."""
-    group = override or str(record.get("group_id") or "")
-    if not group:
-        raise ValueError(
-            f"record {record.get('uuid')} has no group_id; pass --group to choose the "
-            "group file it is restored into"
-        )
-    allowed_groups(group, settings)
-    return group
+    return _named_group(record, override, settings, "the group file it is restored into")
 
 
 def build_model(record: dict[str, Any], group: str) -> Any:

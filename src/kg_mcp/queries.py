@@ -167,17 +167,52 @@ async def search_nodes(
 async def find_edge(
     drivers: list[Any], uuid: str, timeout: float, label: str
 ) -> tuple[Any, Any] | tuple[None, None]:
-    """The edge with this UUID and the driver it was found on, from the first that has it."""
-    from graphiti_core.edges import EntityEdge
+    """The edge with this UUID and the driver it was found on, from the first that has it.
 
+    ``(None, None)`` means no driver has it. A driver that failed to answer is not an
+    absence: when no driver has the edge and one failed, the failure is raised.
+    """
+    from graphiti_core.edges import EntityEdge
+    from graphiti_core.errors import EdgeNotFoundError
+
+    failure: Exception | None = None
     for driver in drivers:
         try:
             return await bounded(EntityEdge.get_by_uuid(driver, uuid), timeout, label), driver
         except TimeoutError:
             raise
-        except Exception:
+        except EdgeNotFoundError:
             continue
+        except Exception as exc:
+            failure = exc
+    if failure is not None:
+        raise RuntimeError(f"edge lookup failed: {failure}") from failure
     return None, None
+
+
+async def episode_edges(
+    graph: Any, settings: Any, groups: list[str], episodes: list[str]
+) -> tuple[list[str], list[str]]:
+    """The current facts these episodes produced, split into those no other episode
+    supports and those another episode restates. Retracting the episodes retires only
+    the first: a fact another source also gave stays true on that source's word."""
+    from graphiti_core.edges import EntityEdge
+    from graphiti_core.nodes import EpisodicNode
+
+    from kg_mcp.retrieval import current_edge
+
+    async def fetch(driver: Any, _ids: list[str]) -> list[Any]:
+        found = await EpisodicNode.get_by_uuids(driver, episodes)
+        uuids = list(dict.fromkeys(uuid for item in found for uuid in item.entity_edges or []))
+        return await EntityEdge.get_by_uuids(driver, uuids) if uuids else []
+
+    edges = [edge for edge in await collect(graph, settings, groups, fetch) if current_edge(edge)]
+    if settings.database.provider != "ladybug":
+        edges = [edge for edge in edges if edge.group_id in groups]
+    mine = set(episodes)
+    only = [edge.uuid for edge in edges if set(edge.episodes or []) <= mine]
+    shared = [edge.uuid for edge in edges if not set(edge.episodes or []) <= mine]
+    return only, shared
 
 
 async def count_nodes(driver: Any, timeout: float, label: str) -> int:
