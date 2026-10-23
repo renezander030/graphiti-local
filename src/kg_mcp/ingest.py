@@ -347,6 +347,43 @@ def _stop_on_signal():
                 continue
 
 
+async def _add_episode(
+    graph: Any, record: dict[str, Any], domain: str, key: str, settings: Settings
+) -> tuple[Any, int, Exception | None]:
+    """Extract one record into the graph, retrying transient errors with backoff.
+
+    Returns ``(result, attempts, error)``; ``error`` is the last exception once the
+    record is given up, else ``None``. One bad episode must not cost the batch.
+    """
+    from graphiti_core.nodes import EpisodeType
+
+    result = None
+    attempts = 0
+    last_error: Exception | None = None
+    while attempts < settings.graph.ingest_max_attempts:
+        attempts += 1
+        try:
+            result = await graph.add_episode(
+                name=str(record["name"]).strip(),
+                episode_body=str(record["body"]).strip(),
+                source=EpisodeType.text,
+                source_description=str(record.get("provenance") or "Graphiti Local import"),
+                reference_time=_reference_time(record.get("valid_at")),
+                group_id=None if settings.database.provider == "ladybug" else domain,
+                uuid=episode_uuid(key),
+            )
+            return result, attempts, None
+        except Exception as exc:  # one bad episode must not cost the batch
+            last_error = exc
+            exhausted = attempts >= settings.graph.ingest_max_attempts
+            if not _retryable(exc) or exhausted:
+                break
+            delay = _retry_delay(settings.graph.ingest_retry_base_seconds, attempts, key)
+            if delay:
+                await asyncio.sleep(delay)
+    return result, attempts, last_error
+
+
 async def ingest_records(
     records: list[dict[str, Any]],
     *,
@@ -420,8 +457,6 @@ async def ingest_records(
             "receipts": [],
         }
 
-    from graphiti_core.nodes import EpisodeType
-
     from kg_mcp.runtime import writing
 
     ingested, failures, receipts, interrupted = 0, [], [], False
@@ -432,37 +467,9 @@ async def ingest_records(
                 if stop["requested"]:
                     interrupted = True
                     break
-                result = None
-                attempts = 0
-                last_error: Exception | None = None
-                while attempts < settings.graph.ingest_max_attempts:
-                    attempts += 1
-                    try:
-                        result = await graph.add_episode(
-                            name=str(record["name"]).strip(),
-                            episode_body=str(record["body"]).strip(),
-                            source=EpisodeType.text,
-                            source_description=str(
-                                record.get("provenance") or "Graphiti Local import"
-                            ),
-                            reference_time=_reference_time(record.get("valid_at")),
-                            group_id=(
-                                None if settings.database.provider == "ladybug" else domain
-                            ),
-                            uuid=episode_uuid(key),
-                        )
-                        last_error = None
-                        break
-                    except Exception as exc:  # one bad episode must not cost the batch
-                        last_error = exc
-                        exhausted = attempts >= settings.graph.ingest_max_attempts
-                        if not _retryable(exc) or exhausted:
-                            break
-                        delay = _retry_delay(
-                            settings.graph.ingest_retry_base_seconds, attempts, key
-                        )
-                        if delay:
-                            await asyncio.sleep(delay)
+                result, attempts, last_error = await _add_episode(
+                    graph, record, domain, key, settings
+                )
                 if last_error is not None:
                     exc = last_error
                     detail = str(exc).strip() or f"{type(exc).__name__} (no message)"

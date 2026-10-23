@@ -129,12 +129,6 @@ async def _build(database: Path) -> int:
         await driver.close()
 
 
-def _engine_version() -> str:
-    from kg_mcp.ladybug import _alias_kuzu
-
-    return str(getattr(_alias_kuzu(), "__version__", "unknown"))
-
-
 def _facts_digest() -> str:
     """The shipped facts' fingerprint, so a graph cached from older facts is rebuilt."""
     return hashlib.sha256(_facts_path().read_bytes()).hexdigest()[:12]
@@ -148,11 +142,11 @@ def _ensure_graph(home: Path) -> Path:
     records the engine and the facts that built the graph; anything else rebuilds it
     from scratch.
     """
-    from kg_mcp.ladybug import setup_database
+    from kg_mcp.ladybug import engine_version, setup_database
 
     database = home / "graph.ladybug"
     marker = home / ".built"
-    engine = _engine_version()
+    engine = engine_version()
     digest = _facts_digest()
     if marker.exists() and marker.read_text().split()[1:] == [engine, digest]:
         return database

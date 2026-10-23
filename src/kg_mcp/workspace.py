@@ -515,6 +515,66 @@ def _update(item_id: str, *, archive: bool = False, **fields: Any) -> None:
     _rewrite(change)
 
 
+async def _land(record: dict) -> tuple[str | None, str | None]:
+    """Ingest one episode: ``(episode_uuid, None)`` once a fact landed, else
+    ``(None, reason)``. An extraction that produced no fact has not landed."""
+    from kg_mcp.ingest import ingest_records
+
+    result = await ingest_records([record], apply=True, resume=False)
+    if result["ingested"] != 1:
+        return None, result["failed"][0]["error"] if result["failed"] else "not ingested"
+    if not result["receipts"] or result["receipts"][0]["edges"] == 0:
+        return None, "extraction produced no facts from this proposal"
+    return result["receipts"][0]["episode_uuid"], None
+
+
+async def _drain_retire(item: dict) -> tuple[bool, list[dict]]:
+    """Retire all of what the reviewer approved or nothing, leaving the item approved.
+    Returns whether the item was archived, and its failures."""
+    from kg_mcp.ingest import retire_edges
+
+    outcome = await retire_edges(
+        item["domain"],
+        item["edges"],
+        ended=datetime.fromisoformat(item["valid_at"]) if item.get("valid_at") else None,
+    )
+    if outcome["missing"]:
+        return False, [
+            {
+                "id": item["id"],
+                "domain": item["domain"],
+                "error": "fact edge(s) not found in this group: " + ", ".join(outcome["missing"]),
+            }
+        ]
+    _update(item["id"], archive=True, **outcome)
+    return True, []
+
+
+async def _drain_facts(item: dict) -> tuple[bool, list[dict]]:
+    """Land each fact still to land. Archive only once every fact landed; a failure leaves
+    the proposal approved, with what did land recorded, so the next drain retries the rest."""
+    total = len(_texts(item))
+    landed = list(item.get("landed") or [])
+    episodes = list(item.get("episodes") or [])
+    failures = []
+    for index, record in _episodes(item):
+        episode, error = await _land(record)
+        if error:
+            failure = {"id": item["id"], "domain": item["domain"], "error": error}
+            if total > 1:
+                failure["fact"] = index + 1
+            failures.append(failure)
+            continue
+        landed.append(index)
+        episodes.append(episode)
+        if len(landed) < total:
+            _update(item["id"], landed=landed, episodes=episodes)
+    done = len(landed) == total
+    if done:
+        _update(item["id"], archive=True, landed=landed, episodes=episodes)
+    return done, failures
+
+
 async def drain(*, apply: bool) -> dict:
     approved = [item for item in _read() if item.get("status") == "approved"]
     if not approved or not apply:
@@ -525,8 +585,6 @@ async def drain(*, apply: bool) -> dict:
             "planned": [row for item in approved for row in _planned(item)],
         }
 
-    from kg_mcp.ingest import ingest_records, retire_edges
-
     completed, failures = 0, []
     for item in approved:
         error = _binding_error(item)
@@ -535,52 +593,10 @@ async def drain(*, apply: bool) -> dict:
             continue
         if not _claim(item):
             continue  # rejected or changed since this drain read the queue
-        if item["operation"] == "retire":
-            outcome = await retire_edges(
-                item["domain"],
-                item["edges"],
-                ended=datetime.fromisoformat(item["valid_at"]) if item.get("valid_at") else None,
-            )
-            if outcome["missing"]:
-                # Retire all of what the reviewer approved or nothing; the item stays approved.
-                failures.append(
-                    {
-                        "id": item["id"],
-                        "domain": item["domain"],
-                        "error": "fact edge(s) not found in this group: "
-                        + ", ".join(outcome["missing"]),
-                    }
-                )
-                continue
-            _update(item["id"], archive=True, **outcome)
-            completed += 1
-            continue
-        total = len(_texts(item))
-        landed = list(item.get("landed") or [])
-        episodes = list(item.get("episodes") or [])
-        for index, record in _episodes(item):
-            result = await ingest_records([record], apply=True, resume=False)
-            # Archive only what actually landed. A failure, or an extraction that produced
-            # no fact, leaves the proposal approved so the next drain retries it.
-            if result["ingested"] != 1:
-                error = result["failed"][0]["error"] if result["failed"] else "not ingested"
-            elif not result["receipts"] or result["receipts"][0]["edges"] == 0:
-                error = "extraction produced no facts from this proposal"
-            else:
-                error = None
-            if error:
-                failure = {"id": item["id"], "domain": item["domain"], "error": error}
-                if total > 1:
-                    failure["fact"] = index + 1
-                failures.append(failure)
-                continue
-            landed.append(index)
-            episodes.append(result["receipts"][0]["episode_uuid"])
-            if len(landed) < total:
-                _update(item["id"], landed=landed, episodes=episodes)
-        if len(landed) == total:
-            _update(item["id"], archive=True, landed=landed, episodes=episodes)
-            completed += 1
+        land = _drain_retire if item["operation"] == "retire" else _drain_facts
+        done, failed = await land(item)
+        failures.extend(failed)
+        completed += done
     return {"applied": True, "ingested": completed, "failed": failures, "planned": []}
 
 
