@@ -289,11 +289,16 @@ def _record_event(filename: str, entry: dict[str, Any]) -> None:
 
 
 def _retryable(exc: Exception) -> bool:
+    if type(exc).__name__ == "OutputTruncatedError":
+        return False  # the same request is cut off at the same ceiling again
     if isinstance(exc, (TimeoutError, ConnectionError, OSError, json.JSONDecodeError)):
         return True
     if type(exc).__name__ in {"RateLimitError", "EmptyResponseError", "ValidationError"}:
         return True
     detail = str(exc).lower()
+    # A quota or overload answer (HTTP 429, RESOURCE_EXHAUSTED) clears after a wait.
+    if re.search(r"\b429\b", detail):
+        return True
     return any(
         token in detail
         for token in (
@@ -305,6 +310,10 @@ def _retryable(exc: Exception) -> bool:
             "connection",
             "unavailable",
             "try again",
+            "too many requests",
+            "resource_exhausted",
+            "resource exhausted",
+            "overloaded",
         )
     )
 

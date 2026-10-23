@@ -20,7 +20,11 @@ SECRET_SHAPES = (
         "api key",
         r"\b(sk-(ant-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}"
         r"|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}"
-        r"|hf_[A-Za-z0-9]{30,}|fw_[A-Za-z0-9]{20,})",
+        r"|hf_[A-Za-z0-9]{30,}|fw_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}"
+        r"|npm_[A-Za-z0-9]{36}|pypi-[A-Za-z0-9_-]{50,}|[sr]k_live_[A-Za-z0-9]{20,}"
+        r"|ya29\.[A-Za-z0-9_-]{20,}|xapp-\d-[A-Za-z0-9-]{20,}|ASIA[0-9A-Z]{16}"
+        r"|dop_v1_[a-f0-9]{64}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"
+        r"|shp(at|ss|ca|pa)_[a-fA-F0-9]{32})",
     ),
     ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     ("jwt", r"\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}"),
