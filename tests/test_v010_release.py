@@ -48,11 +48,11 @@ def _approved(workspace, text: str = "Aurora ships weekly.") -> dict:
     return item
 
 
-def test_release_metadata_is_0_10_0():
+def test_release_metadata_is_0_11_0():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "server.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == manifest["packages"][0]["version"] == "0.10.0"
-    assert 'version = "0.10.0"' in (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert manifest["version"] == manifest["packages"][0]["version"] == "0.11.0"
+    assert 'version = "0.11.0"' in (root / "pyproject.toml").read_text(encoding="utf-8")
 
 
 # --- one drain at a time ---

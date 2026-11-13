@@ -238,6 +238,8 @@ def check_embedder_fingerprint(settings: Settings) -> dict[str, str]:
 
     try:
         status, detail = fingerprint.check(settings)
+    except fingerprint.FingerprintError as exc:
+        return _check("embedder-record", FAIL, str(exc))
     except Exception as exc:
         return _check("embedder-record", WARN, f"not determined: {exc}")
     return _check("embedder-record", status, detail)

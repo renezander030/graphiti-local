@@ -30,16 +30,45 @@ def sidecar_path(database_path: str | Path) -> Path:
     return target.with_name(target.name + SIDECAR_SUFFIX)
 
 
+class FingerprintError(ValueError):
+    """Existing embedder metadata cannot establish the graph's model identity."""
+
+
+def _read_metadata(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise FingerprintError(
+            f"invalid embedder metadata in {path}; restore the record before writing"
+        ) from exc
+    if not isinstance(data, dict):
+        raise FingerprintError(
+            f"invalid embedder metadata in {path}; expected an object, restore before writing"
+        )
+    return data
+
+
+def _identity(data: Any, path: Path) -> dict[str, Any]:
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("model"), str)
+        or not data["model"].strip()
+        or type(data.get("dimensions")) is not int
+        or data["dimensions"] <= 0
+    ):
+        raise FingerprintError(
+            f"invalid embedder identity in {path}; restore model and dimensions before writing"
+        )
+    return data
+
+
 def recorded_embedder(database_path: str | Path) -> dict[str, Any] | None:
     """The embedder recorded for a Ladybug file, or ``None`` before its first write."""
     path = sidecar_path(database_path)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    data = _read_metadata(path)
+    return _identity(data, path) if data is not None else None
 
 
 def record_embedder(
@@ -117,22 +146,24 @@ def _path() -> Path:
 
 
 def _load() -> dict[str, Any]:
-    path = _path()
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
+    data = _read_metadata(_path())
+    return data if data is not None else {}
 
 
 def recorded(settings: Settings) -> dict[str, Any] | None:
-    entry = _load().get(database_key(settings))
-    if isinstance(entry, dict):
-        return entry
+    data = _load()
+    key = database_key(settings)
+    entry = _identity(data[key], _path()) if key in data else None
     path = _ladybug_file(settings)
-    return recorded_embedder(path) if path else None
+    sidecar = recorded_embedder(path) if path else None
+    if entry is not None and sidecar is not None and _drift_message(
+        sidecar, entry["model"], entry["dimensions"]
+    ):
+        raise FingerprintError(
+            "workspace and sidecar embedder identities disagree; restore consistent "
+            "records for the stored vectors before writing"
+        )
+    return entry if entry is not None else sidecar
 
 
 def _ladybug_file(settings: Settings) -> str | None:

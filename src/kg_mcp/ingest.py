@@ -291,6 +291,11 @@ def _record_event(filename: str, entry: dict[str, Any]) -> None:
 def _retryable(exc: Exception) -> bool:
     if type(exc).__name__ == "OutputTruncatedError":
         return False  # the same request is cut off at the same ceiling again
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and 400 <= status < 600:
+        return status == 429 or status >= 500
     if isinstance(exc, (TimeoutError, ConnectionError, OSError, json.JSONDecodeError)):
         return True
     if type(exc).__name__ in {"RateLimitError", "EmptyResponseError", "ValidationError"}:
