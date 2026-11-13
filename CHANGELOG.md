@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0
+
+- Refuse writes when an existing embedder record is malformed or lacks a valid model
+  and dimension identity, or when workspace and sidecar identities disagree.
+  `kg doctor` reports a failure; damaged metadata is preserved
+  for recovery. A missing record still allows a new graph.
+- Retry HTTP 429 and 5xx responses using the provider status code, including
+  OpenAI-compatible SDK errors. Retries retain the configured attempt limit and
+  stable episode identity; other explicit 4xx responses are not retried.
+
 ## 0.10.0
 
 This release makes the reviewed write path safe to run from more than one place,

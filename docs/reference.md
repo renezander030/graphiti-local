@@ -385,6 +385,16 @@ sibling projects:
 - [agentic-task-system](https://github.com/renezander030/agentic-task-system) — a task
   layer for agent context that can read this graph over the same `kg` CLI.
 
+## Damaged embedder metadata
+
+An existing embedder record must be valid JSON with a nonempty model name and a
+positive integer dimension count. Workspace and sidecar identities must agree.
+Invalid records stop ingestion and restoration
+before the graph opens; `kg doctor` reports the record as failed. Restore the record
+from a trusted backup that identifies the model used for the stored vectors before
+writing again. The command leaves the damaged file unchanged. An absent record is
+still allowed for a new graph.
+
 ## License
 
 Apache-2.0.
