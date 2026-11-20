@@ -273,12 +273,12 @@ async def writing(settings: Settings, *, track_fingerprint: bool = True) -> Asyn
     from kg_mcp import fingerprint
     from kg_mcp.write_lock import graph_writer_lock
 
-    # Vectors from two embedders in one graph rank wrongly and say nothing; refuse before
-    # the first write rather than after.
-    drift = fingerprint.drift(settings) if track_fingerprint else None
-    if drift:
-        raise ValueError(drift)
     with graph_writer_lock(settings):
+        # A previous writer can record a different identity while this one waits.
+        # Validate under the same lock as the write, before opening the graph.
+        drift = fingerprint.drift(settings) if track_fingerprint else None
+        if drift:
+            raise ValueError(drift)
         graph = build_graphiti(settings, read_only=False)
         try:
             await graph.build_indices_and_constraints()

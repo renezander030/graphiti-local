@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1
+
+- Recheck embedder identity after acquiring the Ladybug writer lock, before opening
+  the graph. A waiting ingest or restore now refuses a changed or damaged identity
+  left by the preceding writer instead of using a stale validation result.
+
 ## 0.11.0
 
 - Refuse writes when an existing embedder record is malformed or lacks a valid model
