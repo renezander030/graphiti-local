@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import copy
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -276,6 +277,33 @@ def build_llm(settings: Settings):
     return cap_llm_tokens(llm, settings.llm.max_tokens)
 
 
+# graphiti-core joins a multi-group Lucene filter as ``group_id:"a" OR group_id:"b" AND (q)``.
+# Lucene binds AND tighter than OR, so only the last group can match. Group ids are
+# restricted to [A-Za-z0-9_-], so this prefix is always the one graphiti-core wrote.
+_GROUP_TERM = r'group_id:"[A-Za-z0-9_-]*"'
+_UNGROUPED_FILTER = re.compile(rf"^((?:{_GROUP_TERM} OR )+{_GROUP_TERM}) AND ")
+
+
+def parenthesize_group_filter(query: Any) -> Any:
+    """``(group_id:"a" OR group_id:"b") AND (q)``: the fulltext query matches any group."""
+    if not isinstance(query, str):
+        return query
+    return _UNGROUPED_FILTER.sub(r"(\1) AND ", query, count=1)
+
+
+def group_filter_neo4j_driver():
+    """A Neo4j driver whose fulltext queries match every requested group."""
+    from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+    class GroupFilterNeo4jDriver(Neo4jDriver):
+        async def execute_query(self, cypher_query_, **kwargs):
+            if "query" in kwargs and "db.index.fulltext.query" in cypher_query_:
+                kwargs["query"] = parenthesize_group_filter(kwargs["query"])
+            return await super().execute_query(cypher_query_, **kwargs)
+
+    return GroupFilterNeo4jDriver
+
+
 def build_graphiti(settings: Settings, *, read_only: bool):
     os.environ.setdefault("EMBEDDING_DIM", str(settings.embedder.dimensions))
 
@@ -330,12 +358,8 @@ def build_graphiti(settings: Settings, *, read_only: bool):
         return Graphiti(graph_driver=driver, **kwargs)
     if provider == "neo4j":
         database = settings.database.neo4j
-        return Graphiti(
-            uri=database.uri,
-            user=database.username,
-            password=database.password,
-            **kwargs,
-        )
+        driver = group_filter_neo4j_driver()(database.uri, database.username, database.password)
+        return Graphiti(graph_driver=driver, **kwargs)
     raise ValueError(f"unsupported database provider: {provider}")
 
 

@@ -12,6 +12,7 @@
 - Read secrets from files with `${file:/path}` in any config value (Docker/systemd secrets); a missing or unreadable file is refused without printing its content. https://github.com/getzep/graphiti/issues/1887
 - Record provider-reported token usage from the OpenAI-compatible chat client in its token tracker, so usage totals are no longer zero (https://github.com/getzep/graphiti/issues/2058).
 - Rank fact and entity searches over several FalkorDB groups by score across all groups and keep the candidate limit, instead of following group order (https://github.com/getzep/graphiti/issues/2014).
+- Neo4j fulltext searches over several groups now match every group, not only the last: the Lucene group filter is parenthesized before `AND` (https://github.com/getzep/graphiti/issues/2080).
 
 ## 0.11.1
 
