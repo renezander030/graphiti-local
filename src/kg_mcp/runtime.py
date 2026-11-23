@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import os
 from collections.abc import AsyncIterator
@@ -166,6 +167,35 @@ def refuse_truncated_output(llm: Any) -> Any:
     return llm
 
 
+# Usage of the provider responses inside one ``generate_response`` call, retries included.
+_call_usage: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "graphiti_local_call_usage", default=None
+)
+
+
+def count_provider_usage(llm: Any) -> Any:
+    """Add each chat completion's reported ``usage`` to the running call's totals.
+
+    The OpenAI-compatible client parses the answer and drops the response, so its
+    token tracker never sees what the provider reported. A context variable keeps
+    concurrent calls apart; ``generate_response`` records the totals afterwards.
+    """
+    completions = llm.client.chat.completions
+    create = completions.create
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        response = await create(*args, **kwargs)
+        usage = getattr(response, "usage", None)
+        totals = _call_usage.get()
+        if usage is not None and totals is not None:
+            totals[0] += getattr(usage, "prompt_tokens", None) or 0
+            totals[1] += getattr(usage, "completion_tokens", None) or 0
+        return response
+
+    completions.create = counted
+    return llm
+
+
 def build_llm(settings: Settings):
     """Build the extraction client selected by ``llm.api_mode``."""
     from graphiti_core.llm_client.config import LLMConfig
@@ -224,11 +254,23 @@ def build_llm(settings: Settings):
                     )
                 return response_format
 
+            async def generate_response(self, *args, prompt_name=None, **kwargs):
+                totals = [0, 0]
+                token = _call_usage.set(totals)
+                try:
+                    return await super().generate_response(*args, prompt_name=prompt_name, **kwargs)
+                finally:
+                    _call_usage.reset(token)
+                    if totals[0] or totals[1]:
+                        self.token_tracker.record(prompt_name, totals[0], totals[1])
+
         llm = refuse_truncated_output(
-            GraphitiLocalGenericClient(
-                config=llm_config,
-                max_tokens=settings.llm.max_tokens,
-                structured_output_mode=settings.llm.structured_output_mode,
+            count_provider_usage(
+                GraphitiLocalGenericClient(
+                    config=llm_config,
+                    max_tokens=settings.llm.max_tokens,
+                    structured_output_mode=settings.llm.structured_output_mode,
+                )
             )
         )
     return cap_llm_tokens(llm, settings.llm.max_tokens)
