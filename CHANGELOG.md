@@ -15,6 +15,7 @@
 - Neo4j fulltext searches over several groups now match every group, not only the last: the Lucene group filter is parenthesized before `AND` (https://github.com/getzep/graphiti/issues/2080).
 - Store nested attribute values (maps, lists of maps) as JSON text on Neo4j and FalkorDB instead of aborting the episode; Ladybug is unchanged (https://github.com/getzep/graphiti/issues/1885).
 - Create FalkorDB full-text indexes with one `CREATE FULLTEXT INDEX` statement per field, which FalkorDB 6.x accepts; the procedure form graphiti-core uses fails there (https://github.com/getzep/graphiti/issues/1947).
+- `kg retire --proposal` lists the facts the retracted proposal had ended (`ended_by_retracted`); they are surfaced for their own review, not restored, because the graph does not record what else ends them (https://github.com/getzep/graphiti/issues/2165).
 
 ## 0.11.1
 

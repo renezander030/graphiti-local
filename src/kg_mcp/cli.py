@@ -96,9 +96,9 @@ def _queued(item: dict[str, Any]) -> dict[str, Any]:
 async def _retire_command(args: argparse.Namespace) -> dict[str, Any]:
     from kg_mcp.workspace import retire_facts
 
-    edges, kept = list(args.edge or []), []
+    edges, kept, ended = list(args.edge or []), [], []
     if args.proposal:
-        edges, kept = await _retracted_edges(args.group, args.proposal)
+        edges, kept, ended = await _retracted_edges(args.group, args.proposal)
     item = retire_facts(
         args.group,
         edges,
@@ -113,12 +113,23 @@ async def _retire_command(args: argparse.Namespace) -> dict[str, Any]:
     payload = _queued(item)
     if args.proposal:
         payload["kept"] = kept
+        payload["ended_by_retracted"] = ended
+        if ended:
+            payload["ended_by_retracted_note"] = ENDED_NOTE
     return payload
 
 
-async def _retracted_edges(group: str, proposal: str) -> tuple[list[str], list[str]]:
-    """The facts a drained proposal landed that can be retired, and those kept because
-    another source restates them."""
+ENDED_NOTE = (
+    "the retracted proposal had ended these facts; they stay ended, because the graph "
+    "does not record what else ends them. Review each on its own."
+)
+
+
+async def _retracted_edges(
+    group: str, proposal: str
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    """The facts a drained proposal landed that can be retired, those kept because
+    another source restates them, and the facts it had ended, which stay ended."""
     from kg_mcp.config import per_group_ladybug, settings_for_group
     from kg_mcp.output import EXIT_REJECTED
     from kg_mcp.workspace import drained
@@ -132,9 +143,15 @@ async def _retracted_edges(group: str, proposal: str) -> tuple[list[str], list[s
     allowed_groups(group, settings)
     if per_group_ladybug(settings):
         settings = settings_for_group(settings, group)
+    episodes = list(item["episodes"])
     async with _read_only(settings) as graph:
         only, shared = await bounded(
-            queries.episode_edges(graph, settings, [group], list(item["episodes"])),
+            queries.episode_edges(graph, settings, [group], episodes),
+            settings.graph.query_timeout_seconds,
+            "retire",
+        )
+        ended = await bounded(
+            queries.ended_edges(graph, settings, [group], episodes),
             settings.graph.query_timeout_seconds,
             "retire",
         )
@@ -143,7 +160,16 @@ async def _retracted_edges(group: str, proposal: str) -> tuple[list[str], list[s
         raise CommandError(
             f"{proposal} has no current fact that only it supports{detail}", code=EXIT_REJECTED
         )
-    return only, shared
+    retiring = set(only)
+    return (
+        only,
+        shared,
+        [
+            {"uuid": edge.uuid, "fact": edge.fact, "invalid_at": _iso(edge.invalid_at)}
+            for edge in ended
+            if edge.uuid not in retiring
+        ],
+    )
 
 
 def _doctor_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -397,6 +423,11 @@ def _render(command: str, payload: dict[str, Any]) -> list[str]:
             head,
             *(f"  - {edge}" for edge in payload["edges"]),
             *(f"  kept (restated elsewhere): {edge}" for edge in payload.get("kept", [])),
+            *(
+                f"  ended by the retracted proposal, stays ended (review on its own): "
+                f"{edge['uuid']} {edge['fact']} (ended {edge['invalid_at']})"
+                for edge in payload.get("ended_by_retracted", [])
+            ),
         ]
     if command in ("doctor", "verify"):
         mark = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}
