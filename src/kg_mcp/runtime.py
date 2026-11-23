@@ -101,7 +101,12 @@ def build_reranker(settings: Settings):
 
 
 def cap_llm_tokens(llm: Any, maximum: int) -> Any:
-    """Enforce one output ceiling even when an upstream prompt asks for more."""
+    """Enforce one output ceiling even when an upstream prompt asks for more.
+
+    The client also gets its own copy of the messages: graphiti-core appends schema,
+    language and retry text to the list it is given, which would change the caller's
+    prompt and make a repeated identical call send a different request.
+    """
     original = llm.generate_response
 
     async def generate_response(
@@ -124,7 +129,8 @@ def cap_llm_tokens(llm: Any, maximum: int) -> Any:
         }
         if model_size is not None:
             kwargs["model_size"] = model_size
-        return await original(messages, **kwargs)
+        owned = [message.model_copy() for message in messages]
+        return await original(owned, **kwargs)
 
     llm.generate_response = generate_response
     llm.max_tokens = maximum

@@ -84,7 +84,8 @@ async def test_json_feedback_retries_are_preserved(client, monkeypatch, recover)
         with pytest.raises(json.JSONDecodeError):
             await client.generate_response(messages, response_model=Answer)
         assert len(calls) == 3
-    assert len(messages) == len(calls)
+    assert len(messages) == 1
+    assert len(calls[-1]["input"]) == len(calls)
 
 
 @pytest.mark.parametrize("status", [429, 500])
@@ -126,7 +127,8 @@ async def test_terminal_error_after_json_failure_preserves_explicit_cause(client
         await client.generate_response(messages, response_model=Answer)
     assert raised.value is error
     assert raised.value.__cause__ is cause
-    assert len(calls) == len(messages) == 2
+    assert len(calls) == len(calls[-1]["input"]) == 2
+    assert len(messages) == 1
 
 
 async def test_true_refusal_stays_a_refusal(client, monkeypatch):
@@ -179,4 +181,4 @@ async def test_concurrent_terminal_and_json_recovery_are_independent(client, mon
     assert results[1] == {"answer": "ok"}
     assert calls == {"reject": 1, "recover": 2}
     assert len(rejected) == 1
-    assert len(recovered) == 2
+    assert len(recovered) == 1

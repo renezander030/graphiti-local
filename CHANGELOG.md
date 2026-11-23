@@ -6,6 +6,9 @@
   404 or 422 errors on the Responses-mode extraction client. Preserve the original
   error, JSON-repair retries and transient-error handling
   ([getzep/graphiti#2180](https://github.com/getzep/graphiti/issues/2180)).
+- Give the LLM client its own copy of each call's messages, so schema, language and
+  retry text no longer accumulate in the caller's list and a repeated call sends the
+  same request (https://github.com/getzep/graphiti/issues/2059).
 
 ## 0.11.1
 
