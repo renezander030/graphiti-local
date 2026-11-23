@@ -145,13 +145,8 @@ async def _retracted_edges(
         settings = settings_for_group(settings, group)
     episodes = list(item["episodes"])
     async with _read_only(settings) as graph:
-        only, shared = await bounded(
-            queries.episode_edges(graph, settings, [group], episodes),
-            settings.graph.query_timeout_seconds,
-            "retire",
-        )
-        ended = await bounded(
-            queries.ended_edges(graph, settings, [group], episodes),
+        only, shared, ended = await bounded(
+            queries.retraction_edges(graph, settings, [group], episodes),
             settings.graph.query_timeout_seconds,
             "retire",
         )
@@ -160,14 +155,12 @@ async def _retracted_edges(
         raise CommandError(
             f"{proposal} has no current fact that only it supports{detail}", code=EXIT_REJECTED
         )
-    retiring = set(only)
     return (
         only,
         shared,
         [
             {"uuid": edge.uuid, "fact": edge.fact, "invalid_at": _iso(edge.invalid_at)}
             for edge in ended
-            if edge.uuid not in retiring
         ],
     )
 

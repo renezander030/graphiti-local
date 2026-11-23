@@ -254,40 +254,32 @@ async def _episode_entity_edges(
     return edges
 
 
-async def episode_edges(
+async def retraction_edges(
     graph: Any, settings: Any, groups: list[str], episodes: list[str]
-) -> tuple[list[str], list[str]]:
-    """The current facts these episodes produced, split into those no other episode
-    supports and those another episode restates. Retracting the episodes retires only
-    the first: a fact another source also gave stays true on that source's word."""
-    from kg_mcp.retrieval import current_edge
+) -> tuple[list[str], list[str], list[Any]]:
+    """What retracting these episodes touches, from one read of the facts they name.
 
-    edges = [
-        edge
-        for edge in await _episode_entity_edges(graph, settings, groups, episodes)
-        if current_edge(edge)
-    ]
-    mine = set(episodes)
-    only = [edge.uuid for edge in edges if set(edge.episodes or []) <= mine]
-    shared = [edge.uuid for edge in edges if not set(edge.episodes or []) <= mine]
-    return only, shared
-
-
-async def ended_edges(
-    graph: Any, settings: Any, groups: list[str], episodes: list[str]
-) -> list[Any]:
-    """The facts these episodes ended: edges they name but do not support, no longer
-    current. graphiti-core keeps no record of what ended a fact, and can drop or
-    overwrite the evidence for its true end, so retracting the episodes cannot restore
-    these safely; they stay ended and need their own review (getzep/graphiti#2165)."""
+    The current facts they produced split into those no other episode supports and
+    those another episode restates; retracting retires only the first, because a fact
+    another source also gave stays true on that source's word. The third list is the
+    facts they ended: edges they name but do not support, no longer current.
+    graphiti-core keeps no record of what ended a fact, and can drop or overwrite the
+    evidence for its true end, so retracting cannot restore these safely; they stay
+    ended and need their own review (getzep/graphiti#2165).
+    """
     from kg_mcp.retrieval import current_edge
 
     mine = set(episodes)
-    return [
-        edge
-        for edge in await _episode_entity_edges(graph, settings, groups, episodes)
-        if not current_edge(edge) and not mine & set(edge.episodes or [])
-    ]
+    only: list[str] = []
+    shared: list[str] = []
+    ended: list[Any] = []
+    for edge in await _episode_entity_edges(graph, settings, groups, episodes):
+        supporters = set(edge.episodes or [])
+        if current_edge(edge):
+            (only if supporters <= mine else shared).append(edge.uuid)
+        elif not mine & supporters:
+            ended.append(edge)
+    return only, shared, ended
 
 
 async def count_nodes(driver: Any, timeout: float, label: str) -> int:

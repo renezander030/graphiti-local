@@ -246,10 +246,10 @@ def test_a_retraction_retires_only_facts_no_other_episode_gives():
     original = queries.collect
     queries.collect = collect
     try:
-        result = asyncio.run(queries.episode_edges(None, settings, ["example"], ["e1"]))
+        result = asyncio.run(queries.retraction_edges(None, settings, ["example"], ["e1"]))
     finally:
         queries.collect = original
-    assert result == (["only"], ["shared"])
+    assert result == (["only"], ["shared"], [])
 
 
 def _ladybug_ready() -> bool:
