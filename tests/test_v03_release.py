@@ -70,6 +70,8 @@ class SlowGraph:
     async def search(self, *args, **kwargs):
         await asyncio.sleep(5)
 
+    search_ = search
+
     async def close(self):
         return None
 

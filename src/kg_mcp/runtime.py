@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -65,6 +67,21 @@ async def bounded(awaitable: Any, seconds: float, what: str) -> Any:
 OPENAI_RERANKER_MODEL = "gpt-4.1-mini"
 
 
+# Full-text fields graphiti-core indexes on FalkorDB, one DDL statement per field
+# (https://github.com/getzep/graphiti/issues/1947).
+FALKORDB_FULLTEXT_FIELDS = {
+    "(n:Episodic)": ("n", ("content", "source", "source_description", "group_id")),
+    "(n:Entity)": ("n", ("name", "summary", "group_id")),
+    "(n:Community)": ("n", ("name", "group_id")),
+    "()-[e:RELATES_TO]-()": ("e", ("name", "fact", "group_id")),
+}
+FALKORDB_FULLTEXT_INDICES = [
+    f"CREATE FULLTEXT INDEX FOR {pattern} ON ({var}.{field})"
+    for pattern, (var, fields) in FALKORDB_FULLTEXT_FIELDS.items()
+    for field in fields
+]
+
+
 def build_reranker(settings: Settings):
     """Choose a cross-encoder. 'passthrough' stays the default: it costs no extra call.
 
@@ -101,7 +118,12 @@ def build_reranker(settings: Settings):
 
 
 def cap_llm_tokens(llm: Any, maximum: int) -> Any:
-    """Enforce one output ceiling even when an upstream prompt asks for more."""
+    """Enforce one output ceiling even when an upstream prompt asks for more.
+
+    The client also gets its own copy of the messages: graphiti-core appends schema,
+    language and retry text to the list it is given, which would change the caller's
+    prompt and make a repeated identical call send a different request.
+    """
     original = llm.generate_response
 
     async def generate_response(
@@ -124,7 +146,8 @@ def cap_llm_tokens(llm: Any, maximum: int) -> Any:
         }
         if model_size is not None:
             kwargs["model_size"] = model_size
-        return await original(messages, **kwargs)
+        owned = [message.model_copy() for message in messages]
+        return await original(owned, **kwargs)
 
     llm.generate_response = generate_response
     llm.max_tokens = maximum
@@ -160,6 +183,35 @@ def refuse_truncated_output(llm: Any) -> Any:
     return llm
 
 
+# Usage of the provider responses inside one ``generate_response`` call, retries included.
+_call_usage: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "graphiti_local_call_usage", default=None
+)
+
+
+def count_provider_usage(llm: Any) -> Any:
+    """Add each chat completion's reported ``usage`` to the running call's totals.
+
+    The OpenAI-compatible client parses the answer and drops the response, so its
+    token tracker never sees what the provider reported. A context variable keeps
+    concurrent calls apart; ``generate_response`` records the totals afterwards.
+    """
+    completions = llm.client.chat.completions
+    create = completions.create
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        response = await create(*args, **kwargs)
+        usage = getattr(response, "usage", None)
+        totals = _call_usage.get()
+        if usage is not None and totals is not None:
+            totals[0] += getattr(usage, "prompt_tokens", None) or 0
+            totals[1] += getattr(usage, "completion_tokens", None) or 0
+        return response
+
+    completions.create = counted
+    return llm
+
+
 def build_llm(settings: Settings):
     """Build the extraction client selected by ``llm.api_mode``."""
     from graphiti_core.llm_client.config import LLMConfig
@@ -175,7 +227,35 @@ def build_llm(settings: Settings):
         max_tokens=settings.llm.max_tokens,
     )
     if uses_responses_api(settings):
-        llm = OpenAIClient(config=llm_config, max_tokens=settings.llm.max_tokens)
+        from graphiti_core.llm_client.errors import RefusalError
+        from openai import APIStatusError
+
+        class TerminalProviderError(RefusalError):
+            """Carry a provider rejection through the upstream no-retry path."""
+
+            def __init__(self, original):
+                super().__init__(str(original))
+                self.original = original
+                self.original_cause = original.__cause__
+
+        class GraphitiLocalOpenAIClient(OpenAIClient):
+            async def _generate_response(self, *args, **kwargs):
+                try:
+                    return await super()._generate_response(*args, **kwargs)
+                except APIStatusError as exc:
+                    if exc.status_code in {400, 401, 403, 404, 422}:
+                        # A rejected request is not malformed model output. Preserve
+                        # upstream JSON-repair retries without resending this request.
+                        raise TerminalProviderError(exc) from None
+                    raise
+
+            async def generate_response(self, *args, **kwargs):
+                try:
+                    return await super().generate_response(*args, **kwargs)
+                except TerminalProviderError as exc:
+                    raise exc.original from exc.original_cause
+
+        llm = GraphitiLocalOpenAIClient(config=llm_config, max_tokens=settings.llm.max_tokens)
     else:
         class GraphitiLocalGenericClient(OpenAIGenericClient):
             def _build_response_format(self, response_model):
@@ -190,14 +270,111 @@ def build_llm(settings: Settings):
                     )
                 return response_format
 
+            async def generate_response(self, *args, prompt_name=None, **kwargs):
+                totals = [0, 0]
+                token = _call_usage.set(totals)
+                try:
+                    return await super().generate_response(*args, prompt_name=prompt_name, **kwargs)
+                finally:
+                    _call_usage.reset(token)
+                    if totals[0] or totals[1]:
+                        self.token_tracker.record(prompt_name, totals[0], totals[1])
+
         llm = refuse_truncated_output(
-            GraphitiLocalGenericClient(
-                config=llm_config,
-                max_tokens=settings.llm.max_tokens,
-                structured_output_mode=settings.llm.structured_output_mode,
+            count_provider_usage(
+                GraphitiLocalGenericClient(
+                    config=llm_config,
+                    max_tokens=settings.llm.max_tokens,
+                    structured_output_mode=settings.llm.structured_output_mode,
+                )
             )
         )
     return cap_llm_tokens(llm, settings.llm.max_tokens)
+
+
+# graphiti-core joins a multi-group Lucene filter as ``group_id:"a" OR group_id:"b" AND (q)``.
+# Lucene binds AND tighter than OR, so only the last group can match. Group ids are
+# restricted to [A-Za-z0-9_-], so this prefix is always the one graphiti-core wrote.
+_GROUP_TERM = r'group_id:"[A-Za-z0-9_-]*"'
+_UNGROUPED_FILTER = re.compile(rf"^((?:{_GROUP_TERM} OR )+{_GROUP_TERM}) AND ")
+
+
+def parenthesize_group_filter(query: Any) -> Any:
+    """``(group_id:"a" OR group_id:"b") AND (q)``: the fulltext query matches any group."""
+    if not isinstance(query, str):
+        return query
+    return _UNGROUPED_FILTER.sub(r"(\1) AND ", query, count=1)
+
+
+def _graph_driver(settings: Settings, *, read_only: bool) -> Any:
+    """The graph driver for ``database.provider``, with Graphiti Local's backend fixes.
+
+    A read-only driver never creates indexes, so readers coexist with the one writer.
+    Called only by :func:`build_graphiti`, which sets ``EMBEDDING_DIM`` before the import.
+    """
+    provider = settings.database.provider
+    if provider == "falkordb":
+        from graphiti_core.driver.falkordb_driver import FalkorDriver
+        from graphiti_core.graph_queries import get_range_indices
+
+        class PortableFalkorDriver(FalkorDriver):
+            """Full-text indexes as DDL, which FalkorDB 4.x and 6.x both accept.
+
+            graphiti-core creates node full-text indexes with the
+            ``db.idx.fulltext.createNodeIndex({label, stopwords}, ...)`` procedure form,
+            which FalkorDB 6 rejects. One field per statement keeps a rebuild idempotent:
+            a field already indexed is reported as such and skipped. Search strips the
+            stopwords itself, so dropping the index option changes no result.
+            """
+
+            async def build_indices_and_constraints(self, delete_existing: bool = False):
+                if delete_existing:
+                    await self.delete_all_indexes()
+                for query in get_range_indices(self.provider) + FALKORDB_FULLTEXT_INDICES:
+                    await self.execute_query(query)
+
+            def clone(self, database: str):
+                if database == self._database:
+                    return self
+                if database == self.default_group_id:
+                    return type(self)(falkor_db=self.client)
+                return type(self)(falkor_db=self.client, database=database)
+
+        driver_class = PortableFalkorDriver
+        if read_only:
+
+            class ReadOnlyFalkorDriver(PortableFalkorDriver):
+                async def build_indices_and_constraints(self, delete_existing: bool = False):
+                    del delete_existing
+
+            driver_class = ReadOnlyFalkorDriver
+        database = settings.database.falkordb
+        return driver_class(
+            host=database.host,
+            port=database.port,
+            username=database.username,
+            password=database.password or None,
+            database=settings.graph.groups[0],
+        )
+    if provider == "ladybug":
+        from kg_mcp.ladybug import build_ladybug_driver
+
+        # Readers open the file read-only so they coexist with the one writer Ladybug allows.
+        return build_ladybug_driver(settings.database.ladybug.path, read_only=read_only)
+    if provider == "neo4j":
+        from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+        class GroupFilterNeo4jDriver(Neo4jDriver):
+            """A Neo4j driver whose fulltext queries match every requested group."""
+
+            async def execute_query(self, cypher_query_, **kwargs):
+                if "query" in kwargs and "db.index.fulltext.query" in cypher_query_:
+                    kwargs["query"] = parenthesize_group_filter(kwargs["query"])
+                return await super().execute_query(cypher_query_, **kwargs)
+
+        database = settings.database.neo4j
+        return GroupFilterNeo4jDriver(database.uri, database.username, database.password)
+    raise ValueError(f"unsupported database provider: {provider}")
 
 
 def build_graphiti(settings: Settings, *, read_only: bool):
@@ -206,9 +383,11 @@ def build_graphiti(settings: Settings, *, read_only: bool):
     from graphiti_core import Graphiti
     from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 
+    from kg_mcp.attributes import install_nested_attribute_serialiser
     from kg_mcp.dedup import install_deterministic_tie_break
 
     install_deterministic_tie_break()
+    install_nested_attribute_serialiser()
 
     llm = build_llm(settings)
     embedder = OpenAIEmbedder(
@@ -219,48 +398,13 @@ def build_graphiti(settings: Settings, *, read_only: bool):
             embedding_dim=settings.embedder.dimensions,
         )
     )
-
-    kwargs = {
-        "llm_client": llm,
-        "embedder": embedder,
-        "cross_encoder": build_reranker(settings),
-    }
-    provider = settings.database.provider
-    if provider == "falkordb":
-        from graphiti_core.driver.falkordb_driver import FalkorDriver
-
-        driver_class = FalkorDriver
-        if read_only:
-
-            class ReadOnlyFalkorDriver(FalkorDriver):
-                async def build_indices_and_constraints(self, delete_existing: bool = False):
-                    del delete_existing
-
-            driver_class = ReadOnlyFalkorDriver
-        database = settings.database.falkordb
-        driver = driver_class(
-            host=database.host,
-            port=database.port,
-            username=database.username,
-            password=database.password or None,
-            database=settings.graph.groups[0],
-        )
-        return Graphiti(graph_driver=driver, **kwargs)
-    if provider == "ladybug":
-        from kg_mcp.ladybug import build_ladybug_driver
-
-        # Readers open the file read-only so they coexist with the one writer Ladybug allows.
-        driver = build_ladybug_driver(settings.database.ladybug.path, read_only=read_only)
-        return Graphiti(graph_driver=driver, **kwargs)
-    if provider == "neo4j":
-        database = settings.database.neo4j
-        return Graphiti(
-            uri=database.uri,
-            user=database.username,
-            password=database.password,
-            **kwargs,
-        )
-    raise ValueError(f"unsupported database provider: {provider}")
+    cross_encoder = build_reranker(settings)
+    return Graphiti(
+        graph_driver=_graph_driver(settings, read_only=read_only),
+        llm_client=llm,
+        embedder=embedder,
+        cross_encoder=cross_encoder,
+    )
 
 
 @asynccontextmanager

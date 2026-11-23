@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.0
+
+- Stop application-level retries after terminal model-provider HTTP 400, 401, 403,
+  404 or 422 errors on the Responses-mode extraction client. Preserve the original
+  error, JSON-repair retries and transient-error handling
+  ([getzep/graphiti#2180](https://github.com/getzep/graphiti/issues/2180)).
+- Give the LLM client its own copy of each call's messages, so schema, language and
+  retry text no longer accumulate in the caller's list and a repeated call sends the
+  same request (https://github.com/getzep/graphiti/issues/2059).
+- Read secrets from files with `${file:/path}` in any config value (Docker/systemd secrets); a missing or unreadable file is refused without printing its content. https://github.com/getzep/graphiti/issues/1887
+- Record provider-reported token usage from the OpenAI-compatible chat client in its token tracker, so usage totals are no longer zero (https://github.com/getzep/graphiti/issues/2058).
+- Rank fact and entity searches over several FalkorDB groups by score across all groups and keep the candidate limit, instead of following group order (https://github.com/getzep/graphiti/issues/2014).
+- Neo4j fulltext searches over several groups now match every group, not only the last: the Lucene group filter is parenthesized before `AND` (https://github.com/getzep/graphiti/issues/2080).
+- Store nested attribute values (maps, lists of maps) as JSON text on Neo4j and FalkorDB instead of aborting the episode; Ladybug is unchanged (https://github.com/getzep/graphiti/issues/1885).
+- Create FalkorDB full-text indexes with one `CREATE FULLTEXT INDEX` statement per field, which FalkorDB 6.x accepts; the procedure form graphiti-core uses fails there (https://github.com/getzep/graphiti/issues/1947).
+- `kg retire --proposal` lists the facts the retracted proposal had ended (`ended_by_retracted`); they are surfaced for their own review, not restored, because the graph does not record what else ends them (https://github.com/getzep/graphiti/issues/2165).
+
 ## 0.11.1
 
 - Recheck embedder identity after acquiring the Ladybug writer lock, before opening

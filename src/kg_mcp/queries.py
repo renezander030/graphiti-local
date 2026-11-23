@@ -47,6 +47,46 @@ async def collect(graph: Any, settings: Any, groups: list[str], fetch: Any) -> l
     return list(found.values())
 
 
+def rank_merged(results: Any, limit: int) -> Any:
+    """Search results ranked best first across groups and cut to ``limit``.
+
+    graphiti-core searches each FalkorDB group on its own and concatenates the
+    per-group results, so the first group's weak matches come before the next group's
+    strong ones and the list grows to groups x limit (getzep/graphiti#2014). Each kind
+    is reordered by its reranker score, one copy per uuid at its best score.
+    """
+    from graphiti_core.search.search_config import SearchResults
+
+    ranked: dict[str, Any] = {}
+    for kind, scored in (
+        ("edges", "edge_reranker_scores"),
+        ("nodes", "node_reranker_scores"),
+        ("episodes", "episode_reranker_scores"),
+        ("communities", "community_reranker_scores"),
+    ):
+        items, scores = getattr(results, kind), getattr(results, scored)
+        if len(scores) != len(items):  # no comparable scores: keep the order, cut only
+            scores = [0.0] * len(items)
+        best: dict[str, tuple[Any, float]] = {}
+        for item, score in zip(items, scores, strict=True):
+            if item.uuid not in best or score > best[item.uuid][1]:
+                best[item.uuid] = (item, score)
+        top = sorted(best.values(), key=lambda pair: pair[1], reverse=True)[:limit]
+        ranked[kind] = [item for item, _ in top]
+        ranked[scored] = [score for _, score in top]
+    return SearchResults(**ranked)
+
+
+async def ranked_search(
+    graph: Any, settings: Any, query: str, config: Any, groups: list[str] | None, **kwargs: Any
+) -> Any:
+    """``graph.search_`` whose results over several FalkorDB groups are ranked as one list."""
+    result = await graph.search_(query, config=config, group_ids=groups, **kwargs)
+    if settings.database.provider == "falkordb" and groups and len(groups) > 1:
+        return rank_merged(result, config.limit)
+    return result
+
+
 async def search_facts(
     graph: Any,
     settings: Any,
@@ -60,6 +100,11 @@ async def search_facts(
     search_filter: Any = None,
 ) -> tuple[list[tuple[Any, float]], dict[str, Any]]:
     """Current, identity-safe reranked edges for a query."""
+    from graphiti_core.search.search_config_recipes import (
+        EDGE_HYBRID_SEARCH_NODE_DISTANCE,
+        EDGE_HYBRID_SEARCH_RRF,
+    )
+
     from kg_mcp.retrieval import (
         candidate_limit,
         compatible_query,
@@ -72,22 +117,21 @@ async def search_facts(
     safe_query = compatible_query(query, settings)
     candidates = candidate_limit(limit, settings)
     if keyword:
-        result = await graph.search_(
-            safe_query,
-            config=keyword_edge_search_config(candidates),
-            group_ids=groups,
-            center_node_uuid=center_node_uuid,
-            search_filter=search_filter,
-        )
-        edges = result.edges[:candidates]
+        config = keyword_edge_search_config(candidates)
     else:
-        edges = await graph.search(
-            safe_query,
-            group_ids=groups,
-            num_results=candidates,
-            center_node_uuid=center_node_uuid,
-            search_filter=search_filter,
-        )
+        # The recipe ``graph.search`` uses, through ``search_`` so the scores come back.
+        recipe = EDGE_HYBRID_SEARCH_NODE_DISTANCE if center_node_uuid else EDGE_HYBRID_SEARCH_RRF
+        config = recipe.model_copy(update={"limit": candidates})
+    result = await ranked_search(
+        graph,
+        settings,
+        safe_query,
+        config,
+        groups,
+        center_node_uuid=center_node_uuid,
+        search_filter=search_filter,
+    )
+    edges = result.edges[:candidates]
     current, suppressed = current_edges(list(edges), include_invalidated=include_invalidated)
     ranked = await rerank_edges(graph, safe_query, current, settings, limit)
     return ranked, retrieval_stats(
@@ -134,10 +178,12 @@ async def search_nodes(
         config = recipe.model_copy(update={"limit": candidates})
 
     async def search(node_labels: list[str] | None) -> list[Any]:
-        result = await graph.search_(
+        result = await ranked_search(
+            graph,
+            settings,
             safe_query,
-            config=config,
-            group_ids=groups,
+            config,
+            groups,
             center_node_uuid=center_node_uuid,
             search_filter=SearchFilters(node_labels=node_labels),
         )
@@ -190,29 +236,50 @@ async def find_edge(
     return None, None
 
 
-async def episode_edges(
+async def _episode_entity_edges(
     graph: Any, settings: Any, groups: list[str], episodes: list[str]
-) -> tuple[list[str], list[str]]:
-    """The current facts these episodes produced, split into those no other episode
-    supports and those another episode restates. Retracting the episodes retires only
-    the first: a fact another source also gave stays true on that source's word."""
+) -> list[Any]:
+    """Every fact edge these episodes name: those they gave and those they ended."""
     from graphiti_core.edges import EntityEdge
     from graphiti_core.nodes import EpisodicNode
-
-    from kg_mcp.retrieval import current_edge
 
     async def fetch(driver: Any, _ids: list[str]) -> list[Any]:
         found = await EpisodicNode.get_by_uuids(driver, episodes)
         uuids = list(dict.fromkeys(uuid for item in found for uuid in item.entity_edges or []))
         return await EntityEdge.get_by_uuids(driver, uuids) if uuids else []
 
-    edges = [edge for edge in await collect(graph, settings, groups, fetch) if current_edge(edge)]
+    edges = await collect(graph, settings, groups, fetch)
     if settings.database.provider != "ladybug":
         edges = [edge for edge in edges if edge.group_id in groups]
+    return edges
+
+
+async def retraction_edges(
+    graph: Any, settings: Any, groups: list[str], episodes: list[str]
+) -> tuple[list[str], list[str], list[Any]]:
+    """What retracting these episodes touches, from one read of the facts they name.
+
+    The current facts they produced split into those no other episode supports and
+    those another episode restates; retracting retires only the first, because a fact
+    another source also gave stays true on that source's word. The third list is the
+    facts they ended: edges they name but do not support, no longer current.
+    graphiti-core keeps no record of what ended a fact, and can drop or overwrite the
+    evidence for its true end, so retracting cannot restore these safely; they stay
+    ended and need their own review (getzep/graphiti#2165).
+    """
+    from kg_mcp.retrieval import current_edge
+
     mine = set(episodes)
-    only = [edge.uuid for edge in edges if set(edge.episodes or []) <= mine]
-    shared = [edge.uuid for edge in edges if not set(edge.episodes or []) <= mine]
-    return only, shared
+    only: list[str] = []
+    shared: list[str] = []
+    ended: list[Any] = []
+    for edge in await _episode_entity_edges(graph, settings, groups, episodes):
+        supporters = set(edge.episodes or [])
+        if current_edge(edge):
+            (only if supporters <= mine else shared).append(edge.uuid)
+        elif not mine & supporters:
+            ended.append(edge)
+    return only, shared, ended
 
 
 async def count_nodes(driver: Any, timeout: float, label: str) -> int:
