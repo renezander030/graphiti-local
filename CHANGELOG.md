@@ -9,6 +9,7 @@
 - Give the LLM client its own copy of each call's messages, so schema, language and
   retry text no longer accumulate in the caller's list and a repeated call sends the
   same request (https://github.com/getzep/graphiti/issues/2059).
+- Read secrets from files with `${file:/path}` in any config value (Docker/systemd secrets); a missing or unreadable file is refused without printing its content. https://github.com/getzep/graphiti/issues/1887
 
 ## 0.11.1
 

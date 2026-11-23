@@ -1,4 +1,4 @@
-"""Small YAML configuration model with environment-variable expansion."""
+"""Small YAML configuration model with environment-variable and secret-file expansion."""
 
 from __future__ import annotations
 
@@ -11,19 +11,47 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:([^}]*))?\}")
+# ``${file:/run/secrets/name}`` reads a secret from a file (Docker/systemd credentials).
+_FILE_PATTERN = re.compile(r"\$\{file:([^}]*)\}")
 
 
-def _expand(value: Any) -> Any:
+def _read_secret_file(raw: str, base: Path | None) -> str:
+    """Return one secret file's text without one trailing newline; never echo its content."""
+    if not raw.strip():
+        raise ValueError("config secret file reference ${file:} names no path")
+    path = Path(raw.strip()).expanduser()
+    if not path.is_absolute() and base is not None:
+        path = base / path
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"config secret file {path} is not UTF-8 text") from None
+    except OSError as exc:
+        reason = exc.strerror or type(exc).__name__
+        raise ValueError(f"config secret file {path} cannot be read: {reason}") from None
+    for newline in ("\r\n", "\n"):
+        if text.endswith(newline):
+            return text[: -len(newline)]
+    return text
+
+
+def _expand(value: Any, base: Path | None = None) -> Any:
     if isinstance(value, str):
 
         def replace(match: re.Match[str]) -> str:
+            if match.group(1) == "file":
+                return match.group(0)  # a secret file reference, read below
             return os.environ.get(match.group(1), match.group(3) or "")
 
-        return _ENV_PATTERN.sub(replace, value)
+        def replace_file(match: re.Match[str]) -> str:
+            return _read_secret_file(match.group(1), base)
+
+        # The secret text is inserted last, so it is never expanded again.
+        return _FILE_PATTERN.sub(replace_file, _ENV_PATTERN.sub(replace, value))
     if isinstance(value, dict):
-        return {key: _expand(item) for key, item in value.items()}
+        return {key: _expand(item, base) for key, item in value.items()}
     if isinstance(value, list):
-        return [_expand(item) for item in value]
+        return [_expand(item, base) for item in value]
     return value
 
 
@@ -311,7 +339,7 @@ def load_config(explicit: str | Path | None = None) -> Settings:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"configuration root must be a mapping: {path}")
-    return Settings.model_validate(_expand(raw))
+    return Settings.model_validate(_expand(raw, path.parent))
 
 
 def allowed_groups(requested: str | list[str] | None, settings: Settings) -> list[str] | None:

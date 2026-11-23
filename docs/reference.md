@@ -325,7 +325,11 @@ them from current answers.
   applies: loopback names only on a loopback host, no check elsewhere.
 - Configured graph groups form an access allow-list, enforced on reads *and* on
   `kg propose`. A fact addressed to an unconfigured group is refused, not queued.
-- Credentials remain environment variables.
+- Credentials stay out of the config file: `${NAME}` or `${NAME:default}` reads an
+  environment variable, and `${file:/run/secrets/openai_key}` reads a Docker or systemd
+  secret file at load time (one trailing newline stripped; a relative path resolves
+  against the config file's directory). A missing or unreadable file stops loading with
+  an error that names the path, never the content.
 - MCP cannot write or delete.
 - Ingestion requires an explicit command and `--apply`.
 - Proposal approval and application are separate human actions.
