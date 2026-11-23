@@ -306,46 +306,12 @@ def parenthesize_group_filter(query: Any) -> Any:
     return _UNGROUPED_FILTER.sub(r"(\1) AND ", query, count=1)
 
 
-def group_filter_neo4j_driver():
-    """A Neo4j driver whose fulltext queries match every requested group."""
-    from graphiti_core.driver.neo4j_driver import Neo4jDriver
+def _graph_driver(settings: Settings, *, read_only: bool) -> Any:
+    """The graph driver for ``database.provider``, with Graphiti Local's backend fixes.
 
-    class GroupFilterNeo4jDriver(Neo4jDriver):
-        async def execute_query(self, cypher_query_, **kwargs):
-            if "query" in kwargs and "db.index.fulltext.query" in cypher_query_:
-                kwargs["query"] = parenthesize_group_filter(kwargs["query"])
-            return await super().execute_query(cypher_query_, **kwargs)
-
-    return GroupFilterNeo4jDriver
-
-
-def build_graphiti(settings: Settings, *, read_only: bool):
-    os.environ.setdefault("EMBEDDING_DIM", str(settings.embedder.dimensions))
-
-    from graphiti_core import Graphiti
-    from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
-
-    from kg_mcp.attributes import install_nested_attribute_serialiser
-    from kg_mcp.dedup import install_deterministic_tie_break
-
-    install_deterministic_tie_break()
-    install_nested_attribute_serialiser()
-
-    llm = build_llm(settings)
-    embedder = OpenAIEmbedder(
-        config=OpenAIEmbedderConfig(
-            api_key=settings.embedder.api_key or None,
-            base_url=settings.embedder.api_url,
-            embedding_model=settings.embedder.model,
-            embedding_dim=settings.embedder.dimensions,
-        )
-    )
-
-    kwargs = {
-        "llm_client": llm,
-        "embedder": embedder,
-        "cross_encoder": build_reranker(settings),
-    }
+    A read-only driver never creates indexes, so readers coexist with the one writer.
+    Called only by :func:`build_graphiti`, which sets ``EMBEDDING_DIM`` before the import.
+    """
     provider = settings.database.provider
     if provider == "falkordb":
         from graphiti_core.driver.falkordb_driver import FalkorDriver
@@ -383,25 +349,62 @@ def build_graphiti(settings: Settings, *, read_only: bool):
 
             driver_class = ReadOnlyFalkorDriver
         database = settings.database.falkordb
-        driver = driver_class(
+        return driver_class(
             host=database.host,
             port=database.port,
             username=database.username,
             password=database.password or None,
             database=settings.graph.groups[0],
         )
-        return Graphiti(graph_driver=driver, **kwargs)
     if provider == "ladybug":
         from kg_mcp.ladybug import build_ladybug_driver
 
         # Readers open the file read-only so they coexist with the one writer Ladybug allows.
-        driver = build_ladybug_driver(settings.database.ladybug.path, read_only=read_only)
-        return Graphiti(graph_driver=driver, **kwargs)
+        return build_ladybug_driver(settings.database.ladybug.path, read_only=read_only)
     if provider == "neo4j":
+        from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+        class GroupFilterNeo4jDriver(Neo4jDriver):
+            """A Neo4j driver whose fulltext queries match every requested group."""
+
+            async def execute_query(self, cypher_query_, **kwargs):
+                if "query" in kwargs and "db.index.fulltext.query" in cypher_query_:
+                    kwargs["query"] = parenthesize_group_filter(kwargs["query"])
+                return await super().execute_query(cypher_query_, **kwargs)
+
         database = settings.database.neo4j
-        driver = group_filter_neo4j_driver()(database.uri, database.username, database.password)
-        return Graphiti(graph_driver=driver, **kwargs)
+        return GroupFilterNeo4jDriver(database.uri, database.username, database.password)
     raise ValueError(f"unsupported database provider: {provider}")
+
+
+def build_graphiti(settings: Settings, *, read_only: bool):
+    os.environ.setdefault("EMBEDDING_DIM", str(settings.embedder.dimensions))
+
+    from graphiti_core import Graphiti
+    from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+
+    from kg_mcp.attributes import install_nested_attribute_serialiser
+    from kg_mcp.dedup import install_deterministic_tie_break
+
+    install_deterministic_tie_break()
+    install_nested_attribute_serialiser()
+
+    llm = build_llm(settings)
+    embedder = OpenAIEmbedder(
+        config=OpenAIEmbedderConfig(
+            api_key=settings.embedder.api_key or None,
+            base_url=settings.embedder.api_url,
+            embedding_model=settings.embedder.model,
+            embedding_dim=settings.embedder.dimensions,
+        )
+    )
+    cross_encoder = build_reranker(settings)
+    return Graphiti(
+        graph_driver=_graph_driver(settings, read_only=read_only),
+        llm_client=llm,
+        embedder=embedder,
+        cross_encoder=cross_encoder,
+    )
 
 
 @asynccontextmanager
