@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
 
 - Stop application-level retries after terminal model-provider HTTP 400, 401, 403,
   404 or 422 errors on the Responses-mode extraction client. Preserve the original
