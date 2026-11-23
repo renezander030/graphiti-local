@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Stop application-level retries after terminal model-provider HTTP 400, 401, 403,
+  404 or 422 errors on the Responses-mode extraction client. Preserve the original
+  error, JSON-repair retries and transient-error handling
+  ([getzep/graphiti#2180](https://github.com/getzep/graphiti/issues/2180)).
+
 ## 0.11.1
 
 - Recheck embedder identity after acquiring the Ladybug writer lock, before opening

@@ -175,7 +175,35 @@ def build_llm(settings: Settings):
         max_tokens=settings.llm.max_tokens,
     )
     if uses_responses_api(settings):
-        llm = OpenAIClient(config=llm_config, max_tokens=settings.llm.max_tokens)
+        from graphiti_core.llm_client.errors import RefusalError
+        from openai import APIStatusError
+
+        class TerminalProviderError(RefusalError):
+            """Carry a provider rejection through the upstream no-retry path."""
+
+            def __init__(self, original):
+                super().__init__(str(original))
+                self.original = original
+                self.original_cause = original.__cause__
+
+        class GraphitiLocalOpenAIClient(OpenAIClient):
+            async def _generate_response(self, *args, **kwargs):
+                try:
+                    return await super()._generate_response(*args, **kwargs)
+                except APIStatusError as exc:
+                    if exc.status_code in {400, 401, 403, 404, 422}:
+                        # A rejected request is not malformed model output. Preserve
+                        # upstream JSON-repair retries without resending this request.
+                        raise TerminalProviderError(exc) from None
+                    raise
+
+            async def generate_response(self, *args, **kwargs):
+                try:
+                    return await super().generate_response(*args, **kwargs)
+                except TerminalProviderError as exc:
+                    raise exc.original from exc.original_cause
+
+        llm = GraphitiLocalOpenAIClient(config=llm_config, max_tokens=settings.llm.max_tokens)
     else:
         class GraphitiLocalGenericClient(OpenAIGenericClient):
             def _build_response_format(self, response_model):
