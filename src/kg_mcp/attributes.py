@@ -59,17 +59,13 @@ def install_nested_attribute_serialiser() -> None:
     from graphiti_core.nodes import EntityNode
     from graphiti_core.utils import bulk_utils
 
-    node_save = EntityNode.save
-    edge_save = EntityEdge.save
     bulk_tx = bulk_utils.add_nodes_and_edges_bulk_tx
 
-    async def save_node(self: Any, driver: Any) -> Any:
-        target = _flat(self) if driver.provider in _servers() else self
-        return await node_save(target, driver)
+    def flattening(save: Any) -> Any:
+        async def flat_save(self: Any, driver: Any) -> Any:
+            return await save(_flat(self) if driver.provider in _servers() else self, driver)
 
-    async def save_edge(self: Any, driver: Any) -> Any:
-        target = _flat(self) if driver.provider in _servers() else self
-        return await edge_save(target, driver)
+        return flat_save
 
     async def save_bulk(
         tx: Any,
@@ -97,7 +93,7 @@ def install_nested_attribute_serialiser() -> None:
                 if copy is not original:
                     original.fact_embedding = copy.fact_embedding
 
-    EntityNode.save = save_node  # type: ignore[method-assign]
-    EntityEdge.save = save_edge  # type: ignore[method-assign]
+    EntityNode.save = flattening(EntityNode.save)  # type: ignore[method-assign]
+    EntityEdge.save = flattening(EntityEdge.save)  # type: ignore[method-assign]
     bulk_utils.add_nodes_and_edges_bulk_tx = save_bulk
     _INSTALLED = True
