@@ -14,6 +14,7 @@
 - Rank fact and entity searches over several FalkorDB groups by score across all groups and keep the candidate limit, instead of following group order (https://github.com/getzep/graphiti/issues/2014).
 - Neo4j fulltext searches over several groups now match every group, not only the last: the Lucene group filter is parenthesized before `AND` (https://github.com/getzep/graphiti/issues/2080).
 - Store nested attribute values (maps, lists of maps) as JSON text on Neo4j and FalkorDB instead of aborting the episode; Ladybug is unchanged (https://github.com/getzep/graphiti/issues/1885).
+- Create FalkorDB full-text indexes with one `CREATE FULLTEXT INDEX` statement per field, which FalkorDB 6.x accepts; the procedure form graphiti-core uses fails there (https://github.com/getzep/graphiti/issues/1947).
 
 ## 0.11.1
 

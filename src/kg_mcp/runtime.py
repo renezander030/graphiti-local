@@ -67,6 +67,21 @@ async def bounded(awaitable: Any, seconds: float, what: str) -> Any:
 OPENAI_RERANKER_MODEL = "gpt-4.1-mini"
 
 
+# Full-text fields graphiti-core indexes on FalkorDB, one DDL statement per field
+# (https://github.com/getzep/graphiti/issues/1947).
+FALKORDB_FULLTEXT_FIELDS = {
+    "(n:Episodic)": ("n", ("content", "source", "source_description", "group_id")),
+    "(n:Entity)": ("n", ("name", "summary", "group_id")),
+    "(n:Community)": ("n", ("name", "group_id")),
+    "()-[e:RELATES_TO]-()": ("e", ("name", "fact", "group_id")),
+}
+FALKORDB_FULLTEXT_INDICES = [
+    f"CREATE FULLTEXT INDEX FOR {pattern} ON ({var}.{field})"
+    for pattern, (var, fields) in FALKORDB_FULLTEXT_FIELDS.items()
+    for field in fields
+]
+
+
 def build_reranker(settings: Settings):
     """Choose a cross-encoder. 'passthrough' stays the default: it costs no extra call.
 
@@ -334,11 +349,35 @@ def build_graphiti(settings: Settings, *, read_only: bool):
     provider = settings.database.provider
     if provider == "falkordb":
         from graphiti_core.driver.falkordb_driver import FalkorDriver
+        from graphiti_core.graph_queries import get_range_indices
 
-        driver_class = FalkorDriver
+        class PortableFalkorDriver(FalkorDriver):
+            """Full-text indexes as DDL, which FalkorDB 4.x and 6.x both accept.
+
+            graphiti-core creates node full-text indexes with the
+            ``db.idx.fulltext.createNodeIndex({label, stopwords}, ...)`` procedure form,
+            which FalkorDB 6 rejects. One field per statement keeps a rebuild idempotent:
+            a field already indexed is reported as such and skipped. Search strips the
+            stopwords itself, so dropping the index option changes no result.
+            """
+
+            async def build_indices_and_constraints(self, delete_existing: bool = False):
+                if delete_existing:
+                    await self.delete_all_indexes()
+                for query in get_range_indices(self.provider) + FALKORDB_FULLTEXT_INDICES:
+                    await self.execute_query(query)
+
+            def clone(self, database: str):
+                if database == self._database:
+                    return self
+                if database == self.default_group_id:
+                    return type(self)(falkor_db=self.client)
+                return type(self)(falkor_db=self.client, database=database)
+
+        driver_class = PortableFalkorDriver
         if read_only:
 
-            class ReadOnlyFalkorDriver(FalkorDriver):
+            class ReadOnlyFalkorDriver(PortableFalkorDriver):
                 async def build_indices_and_constraints(self, delete_existing: bool = False):
                     del delete_existing
 
