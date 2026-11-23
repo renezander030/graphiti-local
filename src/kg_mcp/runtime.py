@@ -310,9 +310,11 @@ def build_graphiti(settings: Settings, *, read_only: bool):
     from graphiti_core import Graphiti
     from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 
+    from kg_mcp.attributes import install_nested_attribute_serialiser
     from kg_mcp.dedup import install_deterministic_tie_break
 
     install_deterministic_tie_break()
+    install_nested_attribute_serialiser()
 
     llm = build_llm(settings)
     embedder = OpenAIEmbedder(
