@@ -256,6 +256,26 @@ def build_llm(settings: Settings):
                     raise exc.original from exc.original_cause
 
         llm = GraphitiLocalOpenAIClient(config=llm_config, max_tokens=settings.llm.max_tokens)
+        responses = llm.client.responses
+        raw_parse = responses.with_raw_response.parse
+
+        async def parse_unless_truncated(*args: Any, **kwargs: Any) -> Any:
+            # Read the status before parsing: a cut-off JSON answer otherwise becomes a
+            # repair prompt (two more paid requests), and the ingest loop sends it again.
+            # Through the no-retry channel it is raised once, as generic mode does.
+            raw = await raw_parse(*args, **kwargs)
+            body = raw.http_response.json()
+            details = body.get("incomplete_details") or {}
+            reason = details.get("reason")
+            if body.get("status") == "incomplete" and reason == "max_output_tokens":
+                ceiling = kwargs.get("max_output_tokens")
+                raise TerminalProviderError(OutputTruncatedError(
+                    f"the model's answer reached max_output_tokens ({ceiling}) "
+                    "and was cut off; raise llm.max_tokens or split the episode"
+                ))
+            return raw.parse()
+
+        responses.parse = parse_unless_truncated
     else:
         class GraphitiLocalGenericClient(OpenAIGenericClient):
             def _build_response_format(self, response_model):

@@ -101,6 +101,7 @@ def test_a_complete_answer_still_parses_in_one_request():
 
 def test_an_answer_incomplete_for_another_reason_keeps_its_old_path():
     seen: list[httpx.Request] = []
-    llm = _llm([_response(json.dumps({"name": "Ada"}), status="incomplete", reason="content_filter")], seen)
+    other = _response(json.dumps({"name": "Ada"}), status="incomplete", reason="content_filter")
+    llm = _llm([other], seen)
     assert _ask(llm) == {"name": "Ada"}
     assert len(seen) == 1
